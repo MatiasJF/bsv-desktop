@@ -45,6 +45,7 @@ import { toast } from 'react-toastify'
 import { EventEmittable } from './EventEmittable'
 import { PermissionQueueManager } from './PermissionQueueManager'
 import { PeerPayManager } from './PeerPayManager'
+import { StasKeyDeriver, StasOwnershipService } from './stas'
 import { StorageElectronIPC } from '../StorageElectronIPC'
 import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
@@ -127,6 +128,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
   // ---- Runtime state ----
   private _managers: WalletServiceSnapshot['managers'] = {}
   private _wallet?: WalletInterface
+  private _stas?: { keyDeriver: StasKeyDeriver; ownership: StasOwnershipService }
   private _settings: WalletSettings = DEFAULT_SETTINGS
   private _activeProfile: WalletProfile | null = null
   private _snapshotLoaded = false
@@ -162,6 +164,8 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
   get adminOriginator() { return this._adminOriginator }
   get managers() { return this._managers }
   get wallet() { return this._wallet }
+  /** STAS BRC-42 services (ownership recognition + receive-key derivation). */
+  get stas() { return this._stas }
   get settings() { return this._settings }
   get activeProfile() { return this._activeProfile }
   get snapshotLoaded() { return this._snapshotLoaded }
@@ -521,6 +525,13 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         storageManager,
       }
       this._wallet = wallet
+
+      // STAS BRC-42 services — ownership recognition + receive-key derivation.
+      const stasKeyDeriver = new StasKeyDeriver(wallet, keyDeriver.identityKey, chain)
+      this._stas = {
+        keyDeriver: stasKeyDeriver,
+        ownership: new StasOwnershipService(stasKeyDeriver),
+      }
 
       // Load settings
       try {

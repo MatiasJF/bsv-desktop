@@ -20,6 +20,7 @@
     "package:linux": "electron-builder --linux",
     "lint:ci": "echo 'No linting'",
     "test": "vitest run --config vitest.config.electron.ts test/translations.test.ts",
+    "test:stas": "vitest run --config vitest.config.electron.ts test/stas",
     "test:perf": "vitest run --config vitest.config.electron.ts"
   },
   "dependencies": {
@@ -42,6 +43,7 @@
     "cors": "^2.8.6",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.4",
+    "dxs-bsv-token-sdk": "file:../dxs-bsv-token-sdk",
     "electron-log": "^5.4.3",
     "electron-updater": "^6.7.3",
     "express": "^4.21.2",
