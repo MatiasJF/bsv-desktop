@@ -19,6 +19,8 @@ import { fork, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { StorageKnex, KnexMigrations, Services, Monitor, WalletStorageManager, ChaintracksServiceClient } from '@bsv/wallet-toolbox';
 import { patchListCertificates } from './optimized-queries.js';
+import { stasMigrationSource } from './stas-migrations/index.js';
+import { StasQueries } from './stas-queries.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -107,6 +109,15 @@ class StorageManager {
       migrationSource: migrations
     });
     console.log(`[Storage] Migrations complete`);
+
+    // Run STAS extension migrations (bsv-desktop-owned). A separate tracking
+    // table keeps them isolated from wallet-toolbox's own migration ledger.
+    console.log(`[Storage] Running STAS extension migrations for ${key}...`);
+    await db.migrate.latest({
+      migrationSource: stasMigrationSource,
+      tableName: 'knex_migrations_stas'
+    });
+    console.log(`[Storage] STAS migrations complete`);
 
     // Create StorageKnex instance
     const storage = new StorageKnex({
@@ -370,6 +381,32 @@ class StorageManager {
       console.error(`[Storage] Error calling ${method}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Run a STAS extension query against the STAS tables for an identity/chain.
+   * Dispatched to `StasQueries` — a bounded surface, separate from the generic
+   * StorageKnex method proxy used by callStorageMethod.
+   */
+  async callStasQuery(
+    identityKey: string,
+    chain: 'main' | 'test',
+    method: string,
+    args: any[]
+  ): Promise<any> {
+    // Ensure storage (and therefore the STAS migrations) have run.
+    await this.getOrCreateStorage(identityKey, chain);
+    const key = `${identityKey}-${chain}`;
+    const db = this.databases.get(key);
+    if (!db) {
+      throw new Error(`No database connection for ${key}`);
+    }
+    const queries = new StasQueries(db);
+    const fn = (queries as any)[method];
+    if (typeof fn !== 'function') {
+      throw new Error(`Unknown STAS query: ${method}`);
+    }
+    return fn.apply(queries, args || []);
   }
 
   /**

@@ -18,6 +18,9 @@ export interface ElectronAPI {
     callMethod: (identityKey: string, chain: 'main' | 'test', method: string, args: any[]) => Promise<{ success: boolean; result?: any; error?: string }>;
     initializeServices: (identityKey: string, chain: 'main' | 'test') => Promise<{ success: boolean; error?: string }>;
   };
+  stas: {
+    query: (identityKey: string, chain: 'main' | 'test', method: string, args: any[]) => Promise<{ success: boolean; result?: any; error?: string }>;
+  };
   updates: {
     check: () => Promise<{ success: boolean; updateInfo?: any; error?: string }>;
     download: () => Promise<{ success: boolean; error?: string }>;
