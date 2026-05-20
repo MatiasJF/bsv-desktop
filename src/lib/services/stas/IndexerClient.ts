@@ -43,38 +43,26 @@ export class IndexerClient {
   constructor(private readonly baseUrl: string = WOC_BASE_MAINNET) {}
 
   /**
-   * UTXOs at a base58 P2PKH-ish address, confirmed + unconfirmed.
+   * UTXOs at a base58 P2PKH-ish address. Returns `[]` on lookup failure
+   * (including 404s, which WoC returns for some address states).
    *
-   * WoC's legacy `/address/{addr}/unspent` endpoint only surfaces confirmed
-   * outputs, so a fresh STAS sitting in mempool returns 0 candidates. Fetching
-   * `/confirmed/unspent` + `/unconfirmed/unspent` in parallel gives the scan
-   * mempool visibility — the unconfirmed ones are tagged `height: 0` so the
-   * discovery loop defers them (confirmed-only MVP) instead of vanishing.
+   * Mempool visibility note: this endpoint only returns CONFIRMED outputs.
+   * A STAS sitting in mempool isn't visible here until the block lands.
+   * The earlier attempt to also hit `/confirmed/unspent` + `/unconfirmed/unspent`
+   * was a dead end — WoC returns 404 for never-used addresses on those subpaths
+   * and rate-limits the unconfirmed one harder. The right path to mempool
+   * visibility is `/address/{addr}/history` (lists all txs incl. mempool),
+   * but that's a more involved change; for MVP we just wait for confirmation.
    */
   async getUtxosForAddress(address: string): Promise<WocUtxo[]> {
-    const [confirmed, unconfirmed] = await Promise.all([
-      this.fetchUtxoList(`/address/${address}/confirmed/unspent`),
-      this.fetchUtxoList(`/address/${address}/unconfirmed/unspent`),
-    ]);
-    return [
-      ...confirmed,
-      ...unconfirmed.map((u) => ({ ...u, height: 0 })),
-    ];
-  }
-
-  private async fetchUtxoList(path: string): Promise<WocUtxo[]> {
-    try {
-      const raw = await this.wocGet<RawWocUtxo[]>(path);
-      if (!Array.isArray(raw)) return [];
-      return raw.map((u) => ({
-        txid: (u.tx_hash ?? u.txHash) as string,
-        vout: (u.tx_pos ?? u.txPos) as number,
-        value: u.value,
-        height: u.height ?? 0,
-      }));
-    } catch {
-      return [];
-    }
+    const raw = await this.wocGet<RawWocUtxo[]>(`/address/${address}/unspent`).catch(() => null);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((u) => ({
+      txid: (u.tx_hash ?? u.txHash) as string,
+      vout: (u.tx_pos ?? u.txPos) as number,
+      value: u.value,
+      height: u.height ?? 0,
+    }));
   }
 
   /**
