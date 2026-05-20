@@ -42,16 +42,39 @@ interface RawWocUtxo {
 export class IndexerClient {
   constructor(private readonly baseUrl: string = WOC_BASE_MAINNET) {}
 
-  /** UTXOs at a base58 P2PKH-ish address. Returns `[]` on lookup failure. */
+  /**
+   * UTXOs at a base58 P2PKH-ish address, confirmed + unconfirmed.
+   *
+   * WoC's legacy `/address/{addr}/unspent` endpoint only surfaces confirmed
+   * outputs, so a fresh STAS sitting in mempool returns 0 candidates. Fetching
+   * `/confirmed/unspent` + `/unconfirmed/unspent` in parallel gives the scan
+   * mempool visibility — the unconfirmed ones are tagged `height: 0` so the
+   * discovery loop defers them (confirmed-only MVP) instead of vanishing.
+   */
   async getUtxosForAddress(address: string): Promise<WocUtxo[]> {
-    const raw = await this.wocGet<RawWocUtxo[]>(`/address/${address}/unspent`);
-    if (!Array.isArray(raw)) return [];
-    return raw.map((u) => ({
-      txid: (u.tx_hash ?? u.txHash) as string,
-      vout: (u.tx_pos ?? u.txPos) as number,
-      value: u.value,
-      height: u.height,
-    }));
+    const [confirmed, unconfirmed] = await Promise.all([
+      this.fetchUtxoList(`/address/${address}/confirmed/unspent`),
+      this.fetchUtxoList(`/address/${address}/unconfirmed/unspent`),
+    ]);
+    return [
+      ...confirmed,
+      ...unconfirmed.map((u) => ({ ...u, height: 0 })),
+    ];
+  }
+
+  private async fetchUtxoList(path: string): Promise<WocUtxo[]> {
+    try {
+      const raw = await this.wocGet<RawWocUtxo[]>(path);
+      if (!Array.isArray(raw)) return [];
+      return raw.map((u) => ({
+        txid: (u.tx_hash ?? u.txHash) as string,
+        vout: (u.tx_pos ?? u.txPos) as number,
+        value: u.value,
+        height: u.height ?? 0,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /**
