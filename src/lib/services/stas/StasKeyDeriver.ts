@@ -79,6 +79,13 @@ export class StasKeyDeriver {
 
   /** Derive and persist the next receive context; returns the stored row. */
   async createNextReceiveContext(): Promise<ReceiveContextRow> {
+    // Pre-check the IPC channel directly. The previous `if (res === undefined)`
+    // check after the insert was a false positive — INSERT queries return void
+    // through the IPC layer, so a successful write yields `res.result === undefined`
+    // (same shape as channel-absent). A direct channel probe is unambiguous.
+    if (typeof window === 'undefined' || !(window as any).electronAPI?.stas) {
+      throw new Error('STAS query channel unavailable — cannot persist receive context');
+    }
     const next = (await this.getHighWaterMark()) + 1;
     const k = await this.deriveReceiveKey(next);
     const row: ReceiveContextRow = {
@@ -89,10 +96,7 @@ export class StasKeyDeriver {
       derivedPublicKey: k.publicKey,
       createdAt: new Date().toISOString(),
     };
-    const res = await this.query('insertReceiveContext', [row]);
-    if (res === undefined) {
-      throw new Error('STAS query channel unavailable — cannot persist receive context');
-    }
+    await this.query('insertReceiveContext', [row]);
     return row;
   }
 
