@@ -30,6 +30,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import CheckIcon from '@mui/icons-material/Check'
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv'
 import { WalletContext } from '../../WalletContext'
+import { stasQuery } from '../../services/stas'
 import type { ScanResult } from '../../services/stas'
 
 interface ReceiveContextView {
@@ -60,6 +61,39 @@ export default function StasDebugPanel() {
   const [registering, setRegistering] = useState(false)
   const [byTxidResult, setByTxidResult] = useState<any>(null)
   const [byTxidError, setByTxidError] = useState<string | null>(null)
+
+  // My-STAS list state
+  const [stasList, setStasList] = useState<any[] | null>(null)
+  const [tokensById, setTokensById] = useState<Record<string, any>>({})
+  const [loadingStas, setLoadingStas] = useState(false)
+  const [stasListError, setStasListError] = useState<string | null>(null)
+
+  // Load (or refresh) the list of STAS in the wallet's basket.
+  const loadStas = React.useCallback(async () => {
+    if (!stas?.keyDeriver) return
+    const identityKey = stas.keyDeriver.identityKey
+    const chain = stas.keyDeriver.chain
+    setLoadingStas(true)
+    setStasListError(null)
+    try {
+      const [outputs, tokens] = await Promise.all([
+        stasQuery(identityKey, chain, 'listStasOutputs', []),
+        stasQuery(identityKey, chain, 'listStasTokens', []),
+      ])
+      setStasList(Array.isArray(outputs) ? outputs : [])
+      const map: Record<string, any> = {}
+      for (const t of tokens ?? []) map[t.tokenId] = t
+      setTokensById(map)
+    } catch (e) {
+      setStasListError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoadingStas(false)
+    }
+  }, [stas])
+
+  React.useEffect(() => {
+    if (stas?.keyDeriver) loadStas()
+  }, [stas, loadStas])
 
   if (!wallet) return null
 
@@ -112,6 +146,7 @@ export default function StasDebugPanel() {
     try {
       const r = await stas.discovery.registerByTxid(txid)
       setByTxidResult(r)
+      if (r && r.registered > 0) loadStas()
     } catch (e) {
       setByTxidError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -137,9 +172,115 @@ export default function StasDebugPanel() {
           DEV — STAS Integration (Task 4)
         </Typography>
         <Typography variant='caption' display='block' color='text.secondary'>
-          Receive: hand out a BRC-42-derived STAS address. Scan: discover STAS UTXOs at
-          all derived addresses and register them via internalizeAction.
+          Receive: hand out a BRC-42-derived STAS address. Register by txid:
+          internalize a STAS the sender broadcast to you. List: your basket.
         </Typography>
+
+        {/* ---- My STAS — basket listing ---- */}
+        <Box sx={{ mt: 2 }}>
+          <Stack
+            direction='row'
+            justifyContent='space-between'
+            alignItems='center'
+            spacing={2}
+          >
+            <Typography variant='subtitle2' sx={{ fontWeight: 600 }}>
+              My STAS ({stasList?.length ?? 0})
+            </Typography>
+            <Button
+              variant='outlined'
+              size='small'
+              onClick={loadStas}
+              disabled={!stas?.keyDeriver || loadingStas}
+              startIcon={loadingStas ? <CircularProgress size={14} /> : null}
+            >
+              {loadingStas ? 'Loading…' : 'Refresh'}
+            </Button>
+          </Stack>
+
+          {stasListError && (
+            <Typography variant='caption' color='error' sx={{ mt: 1, display: 'block' }}>
+              {stasListError}
+            </Typography>
+          )}
+
+          {stasList && stasList.length === 0 && (
+            <Typography
+              variant='caption'
+              color='text.secondary'
+              sx={{ mt: 1, display: 'block' }}
+            >
+              No STAS in the basket yet. Generate a receive address below, send a
+              STAS to it, then use "Register STAS by txid" with the sender's
+              Issue txid.
+            </Typography>
+          )}
+
+          {stasList && stasList.length > 0 && (
+            <Box sx={{ mt: 1 }}>
+              {stasList.map((row: any, i: number) => {
+                const token = tokensById[row.tokenId]
+                const amount = row.tokenSatoshis ?? row.outputSatoshis ?? 0
+                return (
+                  <Box
+                    key={i}
+                    sx={{ p: 1.5, mb: 1, bgcolor: 'action.hover', borderRadius: 1 }}
+                  >
+                    <Stack direction='row' spacing={1} alignItems='center' flexWrap='wrap'>
+                      <Chip
+                        size='small'
+                        label={token?.symbol || 'STAS'}
+                        color='primary'
+                      />
+                      <Chip
+                        size='small'
+                        label={`${amount} sats`}
+                        variant='outlined'
+                      />
+                      {row.brc42KeyId && (
+                        <Chip size='small' label={row.brc42KeyId} variant='outlined' />
+                      )}
+                      {row.spendable === false && (
+                        <Chip size='small' label='not spendable' variant='outlined' />
+                      )}
+                      {row.frozen ? (
+                        <Chip size='small' label='frozen' color='warning' />
+                      ) : null}
+                      {row.confiscated ? (
+                        <Chip size='small' label='confiscated' color='error' />
+                      ) : null}
+                    </Stack>
+                    <Typography
+                      variant='caption'
+                      display='block'
+                      sx={{ mt: 0.5, fontFamily: 'monospace', fontSize: 11 }}
+                    >
+                      {row.txid}:{row.vout}{' '}
+                      <a
+                        href={`https://whatsonchain.com/tx/${row.txid}`}
+                        target='_blank'
+                        rel='noreferrer'
+                        style={{ color: 'inherit' }}
+                      >
+                        [WoC]
+                      </a>
+                    </Typography>
+                    <Typography
+                      variant='caption'
+                      display='block'
+                      color='text.secondary'
+                      sx={{ fontFamily: 'monospace', fontSize: 10 }}
+                    >
+                      tokenId: {row.tokenId?.slice(0, 16)}…
+                    </Typography>
+                  </Box>
+                )
+              })}
+            </Box>
+          )}
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
 
         {/* ---- Receive section ---- */}
         <Box sx={{ mt: 2 }}>
