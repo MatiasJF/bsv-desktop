@@ -195,7 +195,16 @@ export class StasDiscoveryService {
     }
     const txCache = new Map<string, Transaction>();
 
-    for (const { utxos } of scanned) {
+    for (const { address, utxos } of scanned) {
+      // WoC's STAS indexer is queried per-derived-address, so every UTXO it
+      // returns is owned by THIS address by construction. We use that address
+      // mapping as the source of truth for ownership instead of re-parsing the
+      // locking script — that way classic STAS (which the dxs DSTAS parser
+      // rejects) still goes through. The parser is still attempted for
+      // metadata; if it returns null we build a placeholder.
+      const ownerHash160Hex = addressToHash.get(address);
+      const ownerKeyIndex = ownerHash160Hex ? ownerMap.get(ownerHash160Hex) : undefined;
+
       for (const utxo of utxos) {
         result.candidates++;
         try {
@@ -236,12 +245,29 @@ export class StasDiscoveryService {
             continue;
           }
           const lockingScriptHex = out.lockingScript.toHex();
-          const parsed: ParsedDstas | null = parseDstasLockingScript(lockingScriptHex);
-          if (!parsed) continue;
-          result.dstas++;
 
-          // Owner-field match.
-          const keyIndex = ownerMap.get(parsed.ownerFieldHash160);
+          // Two protocols possible:
+          //   - DSTAS: dstasParser succeeds; we trust IT for ownership and reject
+          //     foreign owners (defense in depth against a misindexed UTXO).
+          //   - Classic STAS: dstasParser returns null; we trust the WoC STAS
+          //     indexer's address mapping (it queried this exact derived address).
+          let parsed = parseDstasLockingScript(lockingScriptHex);
+          let keyIndex: number | undefined;
+          if (parsed) {
+            keyIndex = ownerMap.get(parsed.ownerFieldHash160);
+          } else {
+            if (!ownerHash160Hex || ownerKeyIndex === undefined) continue;
+            parsed = {
+              ownerFieldHash160: ownerHash160Hex,
+              tokenId: '',
+              freezeEnabled: false,
+              confiscationEnabled: false,
+              flagsHex: '',
+              serviceFields: [],
+            };
+            keyIndex = ownerKeyIndex;
+          }
+          result.dstas++;
           if (keyIndex === undefined) continue;
           result.ownedAndDstas++;
 

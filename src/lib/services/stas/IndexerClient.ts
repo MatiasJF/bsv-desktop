@@ -43,24 +43,26 @@ export class IndexerClient {
   constructor(private readonly baseUrl: string = WOC_BASE_MAINNET) {}
 
   /**
-   * UTXOs at a base58 P2PKH-ish address. Returns `[]` on lookup failure
-   * (including 404s, which WoC returns for some address states).
+   * STAS UTXOs at a base58 address, via WoC's STAS-aware indexer.
    *
-   * Mempool visibility note: this endpoint only returns CONFIRMED outputs.
-   * A STAS sitting in mempool isn't visible here until the block lands.
-   * The earlier attempt to also hit `/confirmed/unspent` + `/unconfirmed/unspent`
-   * was a dead end — WoC returns 404 for never-used addresses on those subpaths
-   * and rate-limits the unconfirmed one harder. The right path to mempool
-   * visibility is `/address/{addr}/history` (lists all txs incl. mempool),
-   * but that's a more involved change; for MVP we just wait for confirmation.
+   * Path: `/v1/bsv/main/address/{addr}/tokens/unspent`. Response shape:
+   *   { address: string, utxos: null | [{tx_hash, tx_pos, value, height, ...}] }
+   *
+   * Only classic STAS is recognised — the indexer is `stas-tokens-beta` and
+   * pattern-matches the 2021 TAAL template. DSTAS / Divisible STAS (newer
+   * variant from the dxs SDK) is NOT indexed and falls through to `[]`.
+   *
+   * Because we query per-derived-address, every UTXO returned here is by
+   * construction owned by that address — the discovery loop can trust the
+   * address mapping without re-parsing the locking script for ownership.
    */
   async getUtxosForAddress(address: string): Promise<WocUtxo[]> {
-    const raw = await this.wocGet<RawWocUtxo[]>(`/address/${address}/unspent`).catch(() => null);
-    if (!Array.isArray(raw)) return [];
-    return raw.map((u) => ({
-      txid: (u.tx_hash ?? u.txHash) as string,
-      vout: (u.tx_pos ?? u.txPos) as number,
-      value: u.value,
+    const stas = await this.wocGet<any>(`/address/${address}/tokens/unspent`).catch(() => null);
+    if (!stas || !Array.isArray(stas.utxos)) return [];
+    return stas.utxos.map((u: any) => ({
+      txid: (u.tx_hash ?? u.txid) as string,
+      vout: (u.tx_pos ?? u.vout ?? 0) as number,
+      value: u.value ?? u.satoshis ?? 0,
       height: u.height ?? 0,
     }));
   }
