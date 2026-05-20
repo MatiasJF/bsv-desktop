@@ -7,6 +7,7 @@
   "author": "BSV Association <support@bsvassociation.org>",
   "license": "Apache-2.0",
   "scripts": {
+    "postinstall": "electron-builder install-app-deps",
     "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
     "dev:vite": "vite",
     "dev:electron": "tsc -p tsconfig.electron.json && cp electron/storage-loader.cjs electron/updater.cjs dist-electron/ && electron .",
