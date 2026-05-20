@@ -48,8 +48,100 @@ export interface StasDiscoveryDeps {
   gapLimit?: number;
 }
 
+export interface RegisterByTxidResult {
+  txid: string;
+  registered: number;
+  outputs: Array<{
+    vout: number;
+    matched: boolean;
+    /** When matched=true: the recv-N keyIndex that owns the output. */
+    keyIndex?: number;
+    /** When matched=true and register failed: reason string. */
+    reason?: string;
+    /** Was the wallet successful in registering it? */
+    ok?: boolean;
+  }>;
+  /** Error before per-output processing started (e.g. tx not found). */
+  error?: string;
+}
+
 export class StasDiscoveryService {
   constructor(private readonly deps: StasDiscoveryDeps) {}
+
+  /**
+   * Register a STAS UTXO directly by txid, bypassing the (WoC-broken)
+   * address-based scan. WoC indexes outputs at P2PKH addresses; DSTAS outputs
+   * are custom scripts, never findable that way. Real STAS wallets use
+   * STAS-aware indexers — until we have one, this method is the pragmatic
+   * escape hatch: the user (or sender) tells the wallet the txid, and the
+   * wallet parses + registers every owned DSTAS output in that tx.
+   */
+  async registerByTxid(txid: string): Promise<RegisterByTxidResult> {
+    const out: RegisterByTxidResult = { txid, registered: 0, outputs: [] };
+    const services: any = (this.deps.wallet as any).getServices?.();
+    if (!services) {
+      out.error = 'wallet.getServices() unavailable';
+      return out;
+    }
+    let rawTxRes: any;
+    try {
+      rawTxRes = await services.getRawTx(txid);
+    } catch (err) {
+      out.error = `getRawTx failed: ${err instanceof Error ? err.message : String(err)}`;
+      return out;
+    }
+    if (!rawTxRes?.rawTx) {
+      out.error = rawTxRes?.error?.message ?? 'getRawTx returned no rawTx';
+      return out;
+    }
+    let tx: any;
+    try {
+      tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
+    } catch (err) {
+      out.error = `tx parse failed: ${err instanceof Error ? err.message : String(err)}`;
+      return out;
+    }
+
+    const hwm = await this.deps.deriver.getHighWaterMark();
+    const gap = this.deps.gapLimit ?? STAS_GAP_LIMIT;
+    const ownerMap = await this.deps.deriver.enumerateOwnerFields(
+      hwm > 0 ? hwm + gap : Math.min(gap, 5)
+    );
+
+    for (let vout = 0; vout < tx.outputs.length; vout++) {
+      const txout = tx.outputs[vout];
+      const lockingScriptHex: string = txout.lockingScript.toHex();
+      const parsed: ParsedDstas | null = parseDstasLockingScript(lockingScriptHex);
+      if (!parsed) {
+        out.outputs.push({ vout, matched: false });
+        continue;
+      }
+      const keyIndex = ownerMap.get(parsed.ownerFieldHash160);
+      if (keyIndex === undefined) {
+        out.outputs.push({ vout, matched: false });
+        continue;
+      }
+
+      const reg = await this.deps.registration.register({
+        txid,
+        vout,
+        tokenSatoshis: txout.satoshis ?? 0,
+        ownerFieldHash160: parsed.ownerFieldHash160,
+        brc42KeyId: `recv ${keyIndex}`,
+        parsed,
+      });
+      const ok = !!reg.registered;
+      if (ok) out.registered++;
+      out.outputs.push({
+        vout,
+        matched: true,
+        keyIndex,
+        ok,
+        reason: reg.reason,
+      });
+    }
+    return out;
+  }
 
   async scan(): Promise<ScanResult> {
     const result: ScanResult = {

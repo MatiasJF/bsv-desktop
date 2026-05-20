@@ -55,6 +55,12 @@ export default function StasDebugPanel() {
   const [receiveError, setReceiveError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
+  // Register-by-txid state
+  const [txidInput, setTxidInput] = useState('')
+  const [registering, setRegistering] = useState(false)
+  const [byTxidResult, setByTxidResult] = useState<any>(null)
+  const [byTxidError, setByTxidError] = useState<string | null>(null)
+
   if (!wallet) return null
 
   const handleScan = async () => {
@@ -90,6 +96,26 @@ export default function StasDebugPanel() {
       setReceiveError(e instanceof Error ? e.message : String(e))
     } finally {
       setGenerating(false)
+    }
+  }
+
+  const handleRegisterByTxid = async () => {
+    const txid = txidInput.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(txid)) {
+      setByTxidError('Paste a 64-hex-character txid.')
+      return
+    }
+    if (!stas?.discovery) return
+    setRegistering(true)
+    setByTxidError(null)
+    setByTxidResult(null)
+    try {
+      const r = await stas.discovery.registerByTxid(txid)
+      setByTxidResult(r)
+    } catch (e) {
+      setByTxidError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRegistering(false)
     }
   }
 
@@ -182,6 +208,83 @@ export default function StasDebugPanel() {
           {receiveError && (
             <Typography variant='caption' color='error' sx={{ mt: 1, display: 'block' }}>
               {receiveError}
+            </Typography>
+          )}
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
+
+        {/* ---- Register-by-txid section ----
+            WoC's address-based unspent endpoint can't surface DSTAS outputs
+            (custom scripts, not P2PKH). Paste the Issue txid your sender gave
+            you and the wallet parses + registers any owned DSTAS outputs
+            in that tx directly. */}
+        <Box sx={{ mb: 2 }}>
+          <Typography variant='subtitle2' sx={{ fontWeight: 600, mb: 1 }}>
+            Register STAS by txid
+          </Typography>
+          <Typography variant='caption' display='block' color='text.secondary' sx={{ mb: 1 }}>
+            Paste the Issue txid from your sender. WoC can't find DSTAS UTXOs by
+            owner address (they're custom scripts, not P2PKH), so this is the
+            reliable path until a STAS-aware indexer lands.
+          </Typography>
+          <Stack direction='row' spacing={1} alignItems='center'>
+            <Box sx={{ flexGrow: 1, fontFamily: 'monospace' }}>
+              <input
+                type='text'
+                value={txidInput}
+                onChange={(e) => setTxidInput(e.target.value)}
+                placeholder='64-hex-character txid'
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  fontFamily: 'monospace',
+                  fontSize: 13,
+                  border: '1px solid #ccc',
+                  borderRadius: 4,
+                  boxSizing: 'border-box',
+                }}
+              />
+            </Box>
+            <Button
+              variant='outlined'
+              size='small'
+              onClick={handleRegisterByTxid}
+              disabled={!stas?.discovery || registering}
+              startIcon={registering ? <CircularProgress size={14} /> : null}
+            >
+              {registering ? 'Registering…' : 'Register'}
+            </Button>
+          </Stack>
+
+          {byTxidResult && (
+            <Box sx={{ mt: 1, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+              {byTxidResult.error ? (
+                <Typography variant='caption' color='error'>
+                  Error: {byTxidResult.error}
+                </Typography>
+              ) : (
+                <>
+                  <Typography variant='caption' display='block'>
+                    <strong>{byTxidResult.registered}</strong> output(s) registered
+                    {' '}out of {byTxidResult.outputs.length} parsed.
+                  </Typography>
+                  {byTxidResult.outputs.map((o: any, i: number) => (
+                    <Typography key={i} variant='caption' display='block' sx={{ fontFamily: 'monospace', fontSize: 11 }}>
+                      vout {o.vout}: {o.matched
+                        ? (o.ok
+                          ? `✓ registered (recv ${o.keyIndex})`
+                          : `matched recv ${o.keyIndex}, but ${o.reason ?? 'unknown reason'}`)
+                        : 'no match'}
+                    </Typography>
+                  ))}
+                </>
+              )}
+            </Box>
+          )}
+          {byTxidError && (
+            <Typography variant='caption' color='error' sx={{ mt: 1, display: 'block' }}>
+              {byTxidError}
             </Typography>
           )}
         </Box>
