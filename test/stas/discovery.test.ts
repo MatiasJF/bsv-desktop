@@ -140,6 +140,23 @@ describe('StasDiscoveryService.scan', () => {
     expect(registerCalls).toHaveLength(0)
   })
 
+  test('bootstrap mode: hwm=0 caps the scan at the small bootstrap window', async () => {
+    const deriver = mkDeriver()
+    let addressesSeen = 0
+    const indexer: any = {
+      getUtxosForAddresses: async (addrs: string[]) => {
+        addressesSeen = addrs.length
+        return addrs.map((a) => ({ address: a, utxos: [] }))
+      },
+    }
+    const registration: any = { register: async () => ({ registered: false }) }
+    const wallet: any = { getServices: () => ({ getRawTx: async () => ({ rawTx: [0] }) }) }
+    // Caller asks for a large gap, but hwm=0 should cap the actual scan range.
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 100 })
+    await svc.scan()
+    expect(addressesSeen).toBe(5)
+  })
+
   test('ignores a foreign owner field even when the indexer returns it', async () => {
     const deriver = mkDeriver()
     // Build a tx for a foreign key (a different random root).

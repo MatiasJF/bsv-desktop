@@ -69,8 +69,15 @@ export class StasDiscoveryService {
 
     // 1. Enumerate derived owner fields (hash160 -> keyIndex). Memoized in the
     //    deriver, so repeated scans are cheap after the first.
+    //
+    // Bootstrap mode: when hwm === 0 no receive context has ever been issued,
+    // so a full BIP-32-style gap scan is pure waste (and floods WoC). Cap the
+    // effective range at a small bootstrap window — enough to cover the
+    // "send to recv 1..N without preparation" case but cheap on bandwidth.
     const hwm = await this.deps.deriver.getHighWaterMark();
-    const ownerMap = await this.deps.deriver.enumerateOwnerFields(hwm + gap);
+    const bootstrapGap = 5;
+    const effectiveUpTo = hwm > 0 ? hwm + gap : Math.min(bootstrapGap, gap);
+    const ownerMap = await this.deps.deriver.enumerateOwnerFields(effectiveUpTo);
 
     // 2. Convert each hash160 to a base58 address for WoC.
     const addressToHash = new Map<string, string>();

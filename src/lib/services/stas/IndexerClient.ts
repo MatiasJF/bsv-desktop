@@ -8,7 +8,14 @@
  * WoC's `/address/{addr}/unspent` does not include the locking script — the
  * discovery loop fetches each candidate transaction via Services and decodes
  * the output script itself.
+ *
+ * Routes every request through the wallet's shared `wocFetch` queue so STAS
+ * scans share the global rate-limit budget with the wallet's own WoC polling
+ * (currently 3 req/s for the whole renderer). Without that coordination the
+ * scan triggers 429s on the wallet's balance fetcher.
  */
+
+import { wocFetch } from '../../utils/RateLimitedFetch';
 
 const WOC_BASE_MAINNET = 'https://api.whatsonchain.com/v1/bsv/main';
 
@@ -33,10 +40,7 @@ interface RawWocUtxo {
 }
 
 export class IndexerClient {
-  constructor(
-    private readonly baseUrl: string = WOC_BASE_MAINNET,
-    private readonly delayMs: number = 150
-  ) {}
+  constructor(private readonly baseUrl: string = WOC_BASE_MAINNET) {}
 
   /** UTXOs at a base58 P2PKH-ish address. Returns `[]` on lookup failure. */
   async getUtxosForAddress(address: string): Promise<WocUtxo[]> {
@@ -51,29 +55,27 @@ export class IndexerClient {
   }
 
   /**
-   * Scan UTXOs across many addresses. Sequential with inter-call rate-limit
-   * to keep WoC happy; per-address errors are absorbed so one bad address
-   * does not abort the scan.
+   * Scan UTXOs across many addresses. All requests are queued into the
+   * shared `wocFetch` global rate-limit (3 req/s), so callers can fire many
+   * lookups concurrently without flooding WoC. Per-address errors are
+   * absorbed so one bad address does not abort the scan.
    */
   async getUtxosForAddresses(
     addresses: string[]
   ): Promise<Array<{ address: string; utxos: WocUtxo[] }>> {
-    const results: Array<{ address: string; utxos: WocUtxo[] }> = [];
-    for (let i = 0; i < addresses.length; i++) {
-      const address = addresses[i];
-      try {
-        const utxos = await this.getUtxosForAddress(address);
-        results.push({ address, utxos });
-      } catch {
-        results.push({ address, utxos: [] });
-      }
-      if (i < addresses.length - 1) await sleep(this.delayMs);
-    }
-    return results;
+    return Promise.all(
+      addresses.map(async (address) => {
+        try {
+          return { address, utxos: await this.getUtxosForAddress(address) };
+        } catch {
+          return { address, utxos: [] };
+        }
+      })
+    );
   }
 
   private async wocGet<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await wocFetch.fetch(`${this.baseUrl}${path}`, {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) {
@@ -82,8 +84,4 @@ export class IndexerClient {
     }
     return res.json() as Promise<T>;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
