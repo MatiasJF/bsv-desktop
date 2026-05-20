@@ -1,10 +1,15 @@
 /**
  * STAS Discovery — dev-only debug panel.
  *
- * A small card mounted at the top of the Dashboard in development builds.
- * Shows a manual "Scan for STAS" button and the structured result of the
- * last scan (counts + registered outpoints + errors). Replaced by the
- * real Assets UI in Tasks 5/7.
+ * Mounted at the top of the Dashboard in development builds. Two affordances:
+ *
+ *   - Generate a new STAS receive address (calls
+ *     StasKeyDeriver.createNextReceiveContext — derives the next recv N key,
+ *     persists the row in stas_receive_contexts, displays the base58 address).
+ *   - Scan for STAS (runs StasDiscoveryService.scan and shows the structured
+ *     result: counts, registered outpoints, errors).
+ *
+ * Replaced by the real Assets / Receive UI in Tasks 5/7.
  */
 
 import React, { useContext, useState } from 'react'
@@ -17,54 +22,182 @@ import {
   Chip,
   Stack,
   CircularProgress,
+  IconButton,
+  Tooltip,
+  Divider,
 } from '@mui/material'
+import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import CheckIcon from '@mui/icons-material/Check'
+import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv'
 import { WalletContext } from '../../WalletContext'
 import type { ScanResult } from '../../services/stas'
 
+interface ReceiveContextView {
+  keyIndex: number
+  keyId: string
+  ownerFieldHash160: string
+  derivedPublicKey: string
+  base58Address: string
+}
+
 export default function StasDebugPanel() {
   const { wallet, stas } = useContext(WalletContext)
-  const [scanning, setScanning] = useState(false)
-  const [result, setResult] = useState<ScanResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [lastRunAt, setLastRunAt] = useState<string | null>(null)
 
-  // Hide entirely until the wallet is built — the auto-scan effect fires once
-  // when the wallet first appears; the button is for re-scanning after that.
+  // Scan state
+  const [scanning, setScanning] = useState(false)
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null)
+  const [scanError, setScanError] = useState<string | null>(null)
+  const [lastScanAt, setLastScanAt] = useState<string | null>(null)
+
+  // Receive state
+  const [generating, setGenerating] = useState(false)
+  const [receiveContext, setReceiveContext] = useState<ReceiveContextView | null>(null)
+  const [receiveError, setReceiveError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
   if (!wallet) return null
 
   const handleScan = async () => {
     if (!stas?.discovery) return
     setScanning(true)
-    setError(null)
+    setScanError(null)
     try {
       const r = await stas.discovery.scan()
-      setResult(r)
-      setLastRunAt(new Date().toLocaleTimeString())
+      setScanResult(r)
+      setLastScanAt(new Date().toLocaleTimeString())
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setScanError(e instanceof Error ? e.message : String(e))
     } finally {
       setScanning(false)
+    }
+  }
+
+  const handleGenerateReceive = async () => {
+    if (!stas?.keyDeriver) return
+    setGenerating(true)
+    setReceiveError(null)
+    try {
+      const row = await stas.keyDeriver.createNextReceiveContext()
+      const base58 = new (Address as any)(fromHex(row.ownerFieldHash160)).Value as string
+      setReceiveContext({
+        keyIndex: row.keyIndex,
+        keyId: row.keyId,
+        ownerFieldHash160: row.ownerFieldHash160,
+        derivedPublicKey: row.derivedPublicKey,
+        base58Address: base58,
+      })
+    } catch (e) {
+      setReceiveError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const handleCopyAddress = async () => {
+    if (!receiveContext) return
+    try {
+      await navigator.clipboard.writeText(receiveContext.base58Address)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable — ignore */
     }
   }
 
   return (
     <Card sx={{ mb: 2, border: '1px dashed', borderColor: 'warning.main' }}>
       <CardContent>
+        <Typography variant='caption' color='warning.main' sx={{ fontWeight: 600, display: 'block' }}>
+          DEV — STAS Integration (Task 4)
+        </Typography>
+        <Typography variant='caption' display='block' color='text.secondary'>
+          Receive: hand out a BRC-42-derived STAS address. Scan: discover STAS UTXOs at
+          all derived addresses and register them via internalizeAction.
+        </Typography>
+
+        {/* ---- Receive section ---- */}
+        <Box sx={{ mt: 2 }}>
+          <Stack
+            direction='row'
+            justifyContent='space-between'
+            alignItems='center'
+            spacing={2}
+          >
+            <Typography variant='subtitle2' sx={{ fontWeight: 600 }}>
+              Receive STAS
+            </Typography>
+            <Button
+              variant='outlined'
+              size='small'
+              onClick={handleGenerateReceive}
+              disabled={!stas?.keyDeriver || generating}
+              startIcon={generating ? <CircularProgress size={14} /> : null}
+            >
+              {generating ? 'Generating…' : 'Generate new address'}
+            </Button>
+          </Stack>
+
+          {receiveContext && (
+            <Box sx={{ mt: 1, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+              <Stack direction='row' alignItems='center' spacing={1}>
+                <Chip
+                  size='small'
+                  label={receiveContext.keyId}
+                  color='primary'
+                  variant='outlined'
+                />
+                <Typography
+                  variant='body2'
+                  sx={{
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                    flexGrow: 1,
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {receiveContext.base58Address}
+                </Typography>
+                <Tooltip title={copied ? 'Copied' : 'Copy address'}>
+                  <IconButton size='small' onClick={handleCopyAddress}>
+                    {copied ? (
+                      <CheckIcon fontSize='small' color='success' />
+                    ) : (
+                      <ContentCopyIcon fontSize='small' />
+                    )}
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+              <Typography
+                variant='caption'
+                display='block'
+                color='text.secondary'
+                sx={{ mt: 0.5 }}
+              >
+                Send a STAS UTXO here, wait for confirmation, then click "Scan for STAS".
+                The owner field is {receiveContext.ownerFieldHash160.slice(0, 16)}… (hash160 of {receiveContext.keyId} BRC-42 pubkey).
+              </Typography>
+            </Box>
+          )}
+
+          {receiveError && (
+            <Typography variant='caption' color='error' sx={{ mt: 1, display: 'block' }}>
+              {receiveError}
+            </Typography>
+          )}
+        </Box>
+
+        <Divider sx={{ my: 2 }} />
+
+        {/* ---- Scan section ---- */}
         <Stack
           direction='row'
           justifyContent='space-between'
           alignItems='center'
           spacing={2}
         >
-          <Box>
-            <Typography variant='caption' color='warning.main' sx={{ fontWeight: 600 }}>
-              DEV — STAS Discovery (Task 4)
-            </Typography>
-            <Typography variant='caption' display='block' color='text.secondary'>
-              Scans WhatsOnChain for STAS UTXOs at wallet-derived addresses and
-              registers them into the stas-tokens basket.
-            </Typography>
-          </Box>
+          <Typography variant='subtitle2' sx={{ fontWeight: 600 }}>
+            Discovery scan
+          </Typography>
           <Button
             variant='outlined'
             size='small'
@@ -76,59 +209,59 @@ export default function StasDebugPanel() {
           </Button>
         </Stack>
 
-        {lastRunAt && (
+        {lastScanAt && (
           <Typography
             variant='caption'
             display='block'
             sx={{ mt: 1 }}
             color='text.secondary'
           >
-            Last scan: {lastRunAt}
+            Last scan: {lastScanAt}
           </Typography>
         )}
 
-        {result && (
+        {scanResult && (
           <Stack direction='row' spacing={1} flexWrap='wrap' sx={{ mt: 1 }}>
-            <Chip size='small' label={`Addresses ${result.scannedAddresses}`} />
-            <Chip size='small' label={`Candidates ${result.candidates}`} />
-            <Chip size='small' label={`DSTAS ${result.dstas}`} />
+            <Chip size='small' label={`Addresses ${scanResult.scannedAddresses}`} />
+            <Chip size='small' label={`Candidates ${scanResult.candidates}`} />
+            <Chip size='small' label={`DSTAS ${scanResult.dstas}`} />
             <Chip
               size='small'
-              label={`Owned ${result.ownedAndDstas}`}
+              label={`Owned ${scanResult.ownedAndDstas}`}
               color='primary'
               variant='outlined'
             />
             <Chip
               size='small'
-              label={`Registered ${result.registered}`}
+              label={`Registered ${scanResult.registered}`}
               color='success'
             />
             <Chip
               size='small'
-              label={`Deferred ${result.deferred}`}
+              label={`Deferred ${scanResult.deferred}`}
               color='warning'
               variant='outlined'
             />
             <Chip
               size='small'
-              label={`Already known ${result.skippedAlreadyKnown}`}
+              label={`Already known ${scanResult.skippedAlreadyKnown}`}
               variant='outlined'
             />
             <Chip
               size='small'
-              label={`Errors ${result.errors.length}`}
-              color={result.errors.length ? 'error' : 'default'}
+              label={`Errors ${scanResult.errors.length}`}
+              color={scanResult.errors.length ? 'error' : 'default'}
               variant='outlined'
             />
           </Stack>
         )}
 
-        {result && result.registeredOutpoints.length > 0 && (
+        {scanResult && scanResult.registeredOutpoints.length > 0 && (
           <Box sx={{ mt: 1 }}>
             <Typography variant='caption' color='text.secondary'>
               Registered:
             </Typography>
-            {result.registeredOutpoints.map((o, i) => (
+            {scanResult.registeredOutpoints.map((o, i) => (
               <Typography
                 key={i}
                 variant='caption'
@@ -141,12 +274,12 @@ export default function StasDebugPanel() {
           </Box>
         )}
 
-        {result && result.errors.length > 0 && (
+        {scanResult && scanResult.errors.length > 0 && (
           <Box sx={{ mt: 1 }}>
             <Typography variant='caption' color='error'>
               Errors (first 5):
             </Typography>
-            {result.errors.slice(0, 5).map((e, i) => (
+            {scanResult.errors.slice(0, 5).map((e, i) => (
               <Typography
                 key={i}
                 variant='caption'
@@ -161,13 +294,13 @@ export default function StasDebugPanel() {
           </Box>
         )}
 
-        {error && (
+        {scanError && (
           <Typography
             variant='caption'
             color='error'
             sx={{ mt: 1, display: 'block' }}
           >
-            {error}
+            {scanError}
           </Typography>
         )}
       </CardContent>
