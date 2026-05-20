@@ -11,3 +11,7 @@ export * from './constants';
 export * from './dstasParser';
 export * from './StasKeyDeriver';
 export * from './StasOwnershipService';
+export * from './IndexerClient';
+export * from './StasRegistration';
+export * from './StasDiscoveryService';
+export * from './stasIpc';

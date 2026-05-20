@@ -45,7 +45,7 @@ import { toast } from 'react-toastify'
 import { EventEmittable } from './EventEmittable'
 import { PermissionQueueManager } from './PermissionQueueManager'
 import { PeerPayManager } from './PeerPayManager'
-import { StasKeyDeriver, StasOwnershipService } from './stas'
+import { StasKeyDeriver, StasOwnershipService, IndexerClient, StasRegistration, StasDiscoveryService } from './stas'
 import { StorageElectronIPC } from '../StorageElectronIPC'
 import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
@@ -60,6 +60,13 @@ export type WalletLifecycle =
   | 'error'
 
 // State exposed to React via snapshot
+/** Bundle of STAS services produced by `_buildWallet` and exposed to the UI. */
+export type StasServices = {
+  keyDeriver: StasKeyDeriver
+  ownership: StasOwnershipService
+  discovery: StasDiscoveryService
+}
+
 export type WalletServiceSnapshot = {
   lifecycle: WalletLifecycle
   // Config
@@ -93,6 +100,8 @@ export type WalletServiceSnapshot = {
    * party) must go through `managers.permissionsManager`, not this field.
    */
   wallet?: WalletInterface
+  /** STAS BRC-42 services + discovery loop (Tasks 3/4). */
+  stas?: StasServices
   settings: WalletSettings
   activeProfile: WalletProfile | null
   snapshotLoaded: boolean
@@ -128,7 +137,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
   // ---- Runtime state ----
   private _managers: WalletServiceSnapshot['managers'] = {}
   private _wallet?: WalletInterface
-  private _stas?: { keyDeriver: StasKeyDeriver; ownership: StasOwnershipService }
+  private _stas?: StasServices
   private _settings: WalletSettings = DEFAULT_SETTINGS
   private _activeProfile: WalletProfile | null = null
   private _snapshotLoaded = false
@@ -188,6 +197,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       adminOriginator: this._adminOriginator,
       managers: this._managers,
       wallet: this._wallet,
+      stas: this._stas,
       settings: this._settings,
       activeProfile: this._activeProfile,
       snapshotLoaded: this._snapshotLoaded,
@@ -526,11 +536,20 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       }
       this._wallet = wallet
 
-      // STAS BRC-42 services — ownership recognition + receive-key derivation.
+      // STAS BRC-42 services — ownership recognition + receive-key derivation,
+      // plus the Task-4 discovery loop (WoC scan -> internalizeAction).
       const stasKeyDeriver = new StasKeyDeriver(wallet, keyDeriver.identityKey, chain)
+      const stasRegistration = new StasRegistration(wallet, keyDeriver.identityKey, chain)
+      const stasDiscovery = new StasDiscoveryService({
+        deriver: stasKeyDeriver,
+        indexer: new IndexerClient(),
+        registration: stasRegistration,
+        wallet,
+      })
       this._stas = {
         keyDeriver: stasKeyDeriver,
         ownership: new StasOwnershipService(stasKeyDeriver),
+        discovery: stasDiscovery,
       }
 
       // Load settings

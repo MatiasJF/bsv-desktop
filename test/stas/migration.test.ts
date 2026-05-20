@@ -10,6 +10,29 @@ import { describe, test, expect } from 'vitest'
 import knex from 'knex'
 import { stasMigrationSource } from '../../electron/stas-migrations/index'
 
+// `better-sqlite3` is a native module rebuilt against Electron's Node ABI by
+// the project's `postinstall: electron-builder install-app-deps` hook. Plain
+// `node` (which Vitest uses by default) then can't load it. These tests still
+// pass when better-sqlite3 happens to match the runtime ABI (e.g. you ran
+// `npm rebuild better-sqlite3` first — see `npm run test:stas:db`). We skip
+// gracefully otherwise so the rest of the suite stays runnable in plain node.
+async function canUseBetterSqlite3(): Promise<boolean> {
+  try {
+    const probe = knex({
+      client: 'better-sqlite3',
+      connection: { filename: ':memory:' },
+      useNullAsDefault: true,
+    })
+    await probe.raw('SELECT 1')
+    await probe.destroy()
+    return true
+  } catch {
+    return false
+  }
+}
+
+const sqliteAvailable = await canUseBetterSqlite3()
+
 const MIGRATOR = { migrationSource: stasMigrationSource, tableName: 'knex_migrations_stas' }
 
 async function freshDb() {
@@ -25,7 +48,7 @@ async function freshDb() {
   return db
 }
 
-describe('STAS migration 0001', () => {
+describe.skipIf(!sqliteAvailable)('STAS migration 0001', () => {
   test('creates the three STAS tables and records the migration', async () => {
     const db = await freshDb()
     await db.migrate.latest(MIGRATOR)

@@ -37,9 +37,14 @@ export class StasKeyDeriver {
 
   constructor(
     private readonly wallet: WalletInterface,
-    private readonly identityKey: string,
-    private readonly chain: 'main' | 'test'
+    private readonly _identityKey: string,
+    private readonly _chain: 'main' | 'test'
   ) {}
+
+  /** Identity key of the wallet root (hex). */
+  get identityKey(): string { return this._identityKey; }
+  /** Chain this deriver is scoped to. */
+  get chain(): 'main' | 'test' { return this._chain; }
 
   /** Derive the Nth receive key. Pure — no DB access. */
   async deriveReceiveKey(index: number): Promise<DerivedReceiveKey> {
@@ -68,7 +73,7 @@ export class StasKeyDeriver {
 
   /** Highest issued receive-key index (0 if none / if the STAS query channel is unavailable). */
   async getHighWaterMark(): Promise<number> {
-    const res = await this.query('getReceiveHighWaterMark', [this.identityKey]);
+    const res = await this.query('getReceiveHighWaterMark', [this._identityKey]);
     return res === undefined ? 0 : (res as number);
   }
 
@@ -77,7 +82,7 @@ export class StasKeyDeriver {
     const next = (await this.getHighWaterMark()) + 1;
     const k = await this.deriveReceiveKey(next);
     const row: ReceiveContextRow = {
-      profileIdentityKey: this.identityKey,
+      profileIdentityKey: this._identityKey,
       keyIndex: next,
       keyId: k.keyId,
       ownerFieldHash160: k.ownerFieldHash160,
@@ -100,7 +105,7 @@ export class StasKeyDeriver {
     const api =
       typeof window !== 'undefined' ? (window as any).electronAPI?.stas : undefined;
     if (!api) return undefined;
-    const res = await api.query(this.identityKey, this.chain, method, args);
+    const res = await api.query(this._identityKey, this.chain, method, args);
     if (!res || !res.success) {
       throw new Error(`stas:query ${method} failed: ${res && res.error}`);
     }

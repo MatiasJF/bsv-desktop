@@ -29,6 +29,7 @@ import 'react-toastify/dist/ReactToastify.css'
 import { ADMIN_ORIGINATOR } from './config'
 import { UserContext } from './UserContext'
 import { useWalletService, getWalletService } from './hooks/useWalletService'
+import type { StasServices } from './services/WalletService'
 import { buildPermissionModuleRegistry } from './permissionModules/registry'
 import type { PermissionModuleDefinition, PermissionPromptHandler } from './permissionModules/types'
 import type { GroupPermissionRequest, CounterpartyPermissionRequest } from './types/GroupedPermissions'
@@ -121,6 +122,8 @@ export interface WalletContextValue {
    * plumbing). App-originated requests must go through `managers.permissionsManager`.
    */
   wallet?: WalletInterface;
+  /** STAS BRC-42 services + discovery loop (Tasks 3/4). */
+  stas?: StasServices;
   settings: WalletSettings;
   updateSettings: (newSettings: WalletSettings) => Promise<void>;
   network: 'mainnet' | 'testnet';
@@ -377,6 +380,27 @@ export const WalletContextProvider: React.FC<WalletContextProps> = ({
 
     // No cleanup — IPC listener is permanent, wallet ref is swapped not re-registered
   }, [managers?.permissionsManager, activeProfile?.id, onWalletReady])
+
+  // STAS auto-scan: one shot when the raw wallet + STAS services first appear.
+  // The dev-only Dashboard panel exposes a manual re-scan.
+  useEffect(() => {
+    const stas = walletServiceValues.stas
+    const wallet = walletServiceValues.wallet
+    if (!wallet || !stas?.discovery) return
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        console.log('[STAS Discovery] auto-scan starting')
+        const result = await stas.discovery.scan()
+        if (cancelled) return
+        console.log('[STAS Discovery] auto-scan result:', result)
+      } catch (err) {
+        if (!cancelled) console.error('[STAS Discovery] auto-scan error:', err)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [walletServiceValues.wallet, walletServiceValues.stas])
 
   // ---- Context value ----
   const contextValue = useMemo<WalletContextValue>(() => ({

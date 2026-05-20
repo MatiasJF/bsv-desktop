@@ -30,6 +30,10 @@ import ProtocolAccess from './ProtocolAccess'; // Assuming index.jsx or similar
 import CounterpartyAccess from './CounterpartyAccess'; // Assuming index.jsx or similar
 import CertificateAccess from './CertificateAccess'; // Assuming index.jsx or similar
 import { WalletContext } from '../../WalletContext';
+import StasDebugPanel from './StasDebugPanel';
+
+// Vite exposes `import.meta.env.DEV` only in development builds.
+const IS_DEV = !!((import.meta as any)?.env?.DEV);
 // @ts-expect-error - Type issues with makeStyles
 const useStyles = makeStyles(style, {
   name: 'Dashboard'
@@ -111,6 +115,7 @@ export default function Dashboard() {
       <Menu menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} />
       <div className={classes.page_container}>
         <ErrorBoundary>
+          {IS_DEV && <StasDebugPanel />}
           <Switch>
           {/* Existing Redirects */}
           <Redirect from='/dashboard/counterparty/self' to={`/dashboard/counterparty/${myIdentityKey}`} />

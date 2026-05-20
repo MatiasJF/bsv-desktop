@@ -92,6 +92,32 @@ export class StasQueries {
     await this.knex('stas_outputs').insert(row);
   }
 
+  /** Idempotency probe: has an outpoint already been registered as STAS? */
+  async findStasOutputByOutpoint(
+    txid: string,
+    vout: number
+  ): Promise<StasOutputRow | undefined> {
+    return this.knex('stas_outputs')
+      .join('outputs', 'outputs.outputId', 'stas_outputs.outputId')
+      .where({ 'outputs.txid': txid, 'outputs.vout': vout })
+      .first('stas_outputs.*');
+  }
+
+  /**
+   * Look up wallet-toolbox's `outputs.outputId` for an outpoint — used after
+   * internalizeAction to link a satellite `stas_outputs` row to the
+   * authoritative UTXO row.
+   */
+  async findOutputIdByOutpoint(
+    txid: string,
+    vout: number
+  ): Promise<number | undefined> {
+    const row = await this.knex('outputs')
+      .where({ txid, vout })
+      .first('outputId');
+    return row ? (row.outputId as number) : undefined;
+  }
+
   async updateStasOutputState(
     outputId: number,
     state: { frozen?: boolean; confiscated?: boolean }

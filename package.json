@@ -22,6 +22,7 @@
     "lint:ci": "echo 'No linting'",
     "test": "vitest run --config vitest.config.electron.ts test/translations.test.ts",
     "test:stas": "vitest run --config vitest.config.electron.ts test/stas",
+    "test:stas:db": "npm rebuild better-sqlite3 && vitest run --config vitest.config.electron.ts test/stas; npx electron-builder install-app-deps",
     "test:perf": "vitest run --config vitest.config.electron.ts"
   },
   "dependencies": {
