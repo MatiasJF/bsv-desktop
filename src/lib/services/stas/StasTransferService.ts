@@ -22,20 +22,22 @@
 import type { WalletInterface } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 
-// Old bsv-js + stas-js are CJS — pull them in via require shims that Vite
-// pre-bundles. See vite.config.ts optimizeDeps.
+// stas-js + bsv (1.5.6) are loaded LAZILY inside `transfer()` so they never
+// touch app boot. They are legacy Node-oriented libraries — if either fails
+// to initialise in the browser (Buffer/crypto polyfill mismatches, etc.) the
+// failure is confined to the Send button instead of crashing React mount.
 //
-// Note on the explicit file paths: stas-js's package.json points `module` at
-// `dist/index` but ships no `dist/` folder. Vite's ESM resolver tries `module`
-// first and 404s. Importing `stas-js/index.js` and `stas-js/lib/stas.js`
-// directly side-steps the broken field.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const bsv: any = require('bsv');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const stasJs: any = require('stas-js/index.js');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const stasInternals: any = require('stas-js/lib/stas.js');
-const SIGHASH: number = stasInternals.sighash;
+// Explicit file paths bypass stas-js's broken `module` field, which points
+// at a non-existent `dist/` folder.
+async function loadStasDeps(): Promise<{ bsv: any; stasJs: any; SIGHASH: number }> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const bsv: any = require('bsv');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const stasJs: any = require('stas-js/index.js');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const stasInternals: any = require('stas-js/lib/stas.js');
+  return { bsv, stasJs, SIGHASH: stasInternals.sighash };
+}
 
 const ORIGINATOR = 'admin.stas-transfer';
 
@@ -68,6 +70,18 @@ export class StasTransferService {
 
   async transfer(args: StasTransferArgs): Promise<StasTransferResult> {
     const { source, recipientAddress } = args;
+
+    // Lazy-load the legacy bsv-js + stas-js modules. Any failure here is
+    // surfaced as a normal error instead of crashing the renderer.
+    let bsv: any, stasJs: any, SIGHASH: number;
+    try {
+      ({ bsv, stasJs, SIGHASH } = await loadStasDeps());
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `failed to load stas-js/bsv modules: ${errMsg(err)}`,
+      };
+    }
 
     // 1. Get the owner's public key for this STAS via the BRC-42 derivation
     //    that produced the recv-N owner field. The wallet stores the same
