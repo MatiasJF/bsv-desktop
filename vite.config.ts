@@ -11,6 +11,12 @@ export default defineConfig({
     },
   },
   base: './',
+  // bsv@1.5.6 (legacy bsv-js used by stas-js) references the Node global
+  // identifier directly. The browser has `globalThis` but not `global`,
+  // so map one to the other at bundle time.
+  define: {
+    global: 'globalThis',
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
