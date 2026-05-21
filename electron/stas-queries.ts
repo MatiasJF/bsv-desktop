@@ -122,6 +122,33 @@ export class StasQueries {
     return { updated };
   }
 
+  /**
+   * Override the `default` (change) basket's `numberOfDesiredUTXOs`.
+   *
+   * Wallet-toolbox's `generateChange` aims for this many UTXOs in the change
+   * basket; below the target it adds fragmentation outputs each createAction.
+   * The STAS engine assumes exactly 2 outputs (new STAS + one change), so
+   * we lower the target to 0 around a STAS transfer to suppress
+   * fragmentation, then restore it afterward.
+   *
+   * Returns previous + new values so the caller can restore.
+   */
+  async setDefaultBasketUTXOTarget(target: number): Promise<{
+    previous: number | null;
+    updated: number;
+  }> {
+    const before = await this.knex('output_baskets')
+      .where({ name: 'default' })
+      .first('numberOfDesiredUTXOs');
+    const updated = await this.knex('output_baskets')
+      .where({ name: 'default' })
+      .update({ numberOfDesiredUTXOs: target });
+    return {
+      previous: before?.numberOfDesiredUTXOs ?? null,
+      updated,
+    };
+  }
+
   /** Idempotency probe: has an outpoint already been registered as STAS? */
   async findStasOutputByOutpoint(
     txid: string,
