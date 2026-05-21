@@ -13,6 +13,7 @@
  */
 
 import type { WalletInterface } from '@bsv/sdk';
+import { Beef, Transaction } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 import { STAS_BASKET } from '../../constants/baskets';
 
@@ -111,32 +112,52 @@ export class StasTransferService {
       return { ok: false, reason: `script build: ${errMsg(err)}` };
     }
 
-    // 4. Get inputBEEF from the wallet's own storage. internalizeAction stored
-    //    the source tx + its merkle proof when this STAS was first received;
-    //    `listOutputs({ include: 'entire transactions' })` returns a BEEF
-    //    containing every source tx the wallet has cached for the basket.
-    //    That gives createAction the proof data it needs without us walking
-    //    back through inputs ourselves (which would otherwise hit WoC for
-    //    ancestors that may no longer be retrievable).
+    // 4. Build inputBEEF SPECIFICALLY for the source STAS tx. listOutputs's
+    //    BEEF sometimes omits the very tx we're spending (returns only the
+    //    source-of-source ancestors), which made createAction reject with
+    //    "must contain proof data for possibly known <txid>".
+    //
+    //    The direct path: fetch source rawTx + merkle path via Services, build
+    //    a single-tx BEEF. If Services doesn't surface a proof (rare for
+    //    confirmed UTXOs), fall through to listOutputs's BEEF as a last resort.
     let inputBEEF: number[];
     try {
-      const lor: any = await this.wallet.listOutputs(
-        {
-          basket: STAS_BASKET,
-          include: 'entire transactions',
-          limit: 500,
-        } as any,
-        ORIGINATOR
-      );
-      if (!Array.isArray(lor?.BEEF) || lor.BEEF.length === 0) {
-        return {
-          ok: false,
-          reason: 'wallet.listOutputs returned no BEEF for stas-tokens basket',
-        };
+      const services: any = (this.wallet as any).getServices?.();
+      const [rawTxRes, mpRes] = await Promise.all([
+        services?.getRawTx(source.txid).catch(() => null),
+        services?.getMerklePath(source.txid).catch(() => null),
+      ]);
+
+      if (rawTxRes?.rawTx && mpRes?.merklePath) {
+        const beef = new Beef();
+        const tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
+        tx.merklePath = mpRes.merklePath;
+        beef.mergeTransaction(tx);
+        inputBEEF = beef.toBinary();
+      } else {
+        // Fallback: hand over whatever the wallet's basket cache has. May or
+        // may not include our specific source.
+        const lor: any = await this.wallet.listOutputs(
+          {
+            basket: STAS_BASKET,
+            include: 'entire transactions',
+            limit: 500,
+          } as any,
+          ORIGINATOR
+        );
+        if (!Array.isArray(lor?.BEEF) || lor.BEEF.length === 0) {
+          return {
+            ok: false,
+            reason:
+              `no proof data for source ${source.txid} — Services returned ` +
+              `rawTx=${!!rawTxRes?.rawTx} merklePath=${!!mpRes?.merklePath}; ` +
+              'listOutputs returned no BEEF either',
+          };
+        }
+        inputBEEF = lor.BEEF;
       }
-      inputBEEF = lor.BEEF;
     } catch (err) {
-      return { ok: false, reason: `listOutputs for BEEF: ${errMsg(err)}` };
+      return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
     }
 
     // 5. createAction. Wallet auto-funds (adds BSV inputs from default basket
