@@ -16,6 +16,7 @@ import type { WalletInterface } from '@bsv/sdk';
 import { Beef } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
+import { stasQuery } from './stasIpc';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -55,7 +56,11 @@ export interface StasTransferResult {
 }
 
 export class StasTransferService {
-  constructor(private readonly wallet: WalletInterface) {}
+  constructor(
+    private readonly wallet: WalletInterface,
+    private readonly identityKey: string,
+    private readonly chain: 'main' | 'test'
+  ) {}
 
   async transfer(args: StasTransferArgs): Promise<StasTransferResult> {
     const { source, recipientAddress } = args;
@@ -125,6 +130,33 @@ export class StasTransferService {
       inputBEEF = built.beef;
     } catch (err) {
       return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
+    }
+
+    // 4b. Flip `outputs.spendable` to true. wallet-toolbox marks STAS outputs
+    //     spendable=false on insertion because the custom locking script
+    //     doesn't match a template it knows how to unlock. We handle the
+    //     unlock externally, so the flag is a false negative we need to
+    //     override before createAction's basket-spend gate.
+    try {
+      const outputId: number | null = await stasQuery(
+        this.identityKey,
+        this.chain,
+        'findOutputIdByOutpoint',
+        [source.txid, source.vout]
+      );
+      if (outputId) {
+        await stasQuery(
+          this.identityKey,
+          this.chain,
+          'setOutputSpendable',
+          [outputId, true]
+        );
+      }
+    } catch (err) {
+      // Best effort — proceed; createAction will surface a clearer error if
+      // the spendable flag is still wrong.
+      // eslint-disable-next-line no-console
+      console.warn(`[StasTransferService] could not flip spendable flag: ${errMsg(err)}`);
     }
 
     // 5. createAction. Wallet auto-funds (adds BSV inputs from default basket

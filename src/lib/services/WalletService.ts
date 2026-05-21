@@ -551,7 +551,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         keyDeriver: stasKeyDeriver,
         ownership: new StasOwnershipService(stasKeyDeriver),
         discovery: stasDiscovery,
-        transfer: new StasTransferService(wallet),
+        transfer: new StasTransferService(wallet, keyDeriver.identityKey, chain),
       }
 
       // Load settings

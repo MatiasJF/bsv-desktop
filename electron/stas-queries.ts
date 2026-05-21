@@ -106,6 +106,22 @@ export class StasQueries {
     await this.knex('stas_outputs').insert(row);
   }
 
+  /**
+   * Mark a wallet-toolbox `outputs` row as spendable / not-spendable.
+   *
+   * STAS outputs land in the basket with `spendable=false` because the
+   * toolbox doesn't recognise the custom locking script as one it knows how
+   * to unlock. Our transfer flow handles the unlocking externally via the
+   * BRC-42 sign path, so we need to flip the flag back to `true` so
+   * createAction will let us reference the outpoint as an input.
+   */
+  async setOutputSpendable(outputId: number, spendable: boolean): Promise<{ updated: number }> {
+    const updated = await this.knex('outputs')
+      .where({ outputId })
+      .update({ spendable: spendable ? 1 : 0 });
+    return { updated };
+  }
+
   /** Idempotency probe: has an outpoint already been registered as STAS? */
   async findStasOutputByOutpoint(
     txid: string,
