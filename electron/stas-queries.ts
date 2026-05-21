@@ -82,10 +82,24 @@ export class StasQueries {
         'outputs.satoshis as outputSatoshis',
         'outputs.spendable',
         'outputs.txid',
-        'outputs.vout'
+        'outputs.vout',
+        'outputs.lockingScript' // bytes — converted to hex below for the transfer UI
       );
     if (filter.tokenId) q = q.where('stas_outputs.tokenId', filter.tokenId);
-    return q;
+    const rows = await q;
+    // outputs.lockingScript is stored as Buffer in SQLite (BLOB). Convert to
+    // hex so renderer-side consumers (Transfer UI) get a usable string.
+    return rows.map((r: any) => ({
+      ...r,
+      lockingScript:
+        r.lockingScript == null
+          ? undefined
+          : Buffer.isBuffer(r.lockingScript)
+            ? r.lockingScript.toString('hex')
+            : typeof r.lockingScript === 'string'
+              ? r.lockingScript
+              : Buffer.from(r.lockingScript).toString('hex'),
+    }));
   }
 
   async insertStasOutput(row: StasOutputRow): Promise<void> {

@@ -45,7 +45,7 @@ import { toast } from 'react-toastify'
 import { EventEmittable } from './EventEmittable'
 import { PermissionQueueManager } from './PermissionQueueManager'
 import { PeerPayManager } from './PeerPayManager'
-import { StasKeyDeriver, StasOwnershipService, IndexerClient, StasRegistration, StasDiscoveryService } from './stas'
+import { StasKeyDeriver, StasOwnershipService, IndexerClient, StasRegistration, StasDiscoveryService, StasTransferService } from './stas'
 import { StorageElectronIPC } from '../StorageElectronIPC'
 import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
@@ -65,6 +65,7 @@ export type StasServices = {
   keyDeriver: StasKeyDeriver
   ownership: StasOwnershipService
   discovery: StasDiscoveryService
+  transfer: StasTransferService
 }
 
 export type WalletServiceSnapshot = {
@@ -550,6 +551,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         keyDeriver: stasKeyDeriver,
         ownership: new StasOwnershipService(stasKeyDeriver),
         discovery: stasDiscovery,
+        transfer: new StasTransferService(wallet),
       }
 
       // Load settings

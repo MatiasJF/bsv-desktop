@@ -14,4 +14,5 @@ export * from './StasOwnershipService';
 export * from './IndexerClient';
 export * from './StasRegistration';
 export * from './StasDiscoveryService';
+export * from './StasTransferService';
 export * from './stasIpc';

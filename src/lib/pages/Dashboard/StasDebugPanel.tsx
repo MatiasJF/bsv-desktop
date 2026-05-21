@@ -68,6 +68,12 @@ export default function StasDebugPanel() {
   const [loadingStas, setLoadingStas] = useState(false)
   const [stasListError, setStasListError] = useState<string | null>(null)
 
+  // Per-row Send UI state.
+  const [sendOpenForOutput, setSendOpenForOutput] = useState<string | null>(null)
+  const [sendRecipient, setSendRecipient] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
+
   // Load (or refresh) the list of STAS in the wallet's basket.
   const loadStas = React.useCallback(async () => {
     if (!stas?.keyDeriver) return
@@ -221,6 +227,8 @@ export default function StasDebugPanel() {
               {stasList.map((row: any, i: number) => {
                 const token = tokensById[row.tokenId]
                 const amount = row.tokenSatoshis ?? row.outputSatoshis ?? 0
+                const rowKey = `${row.txid}:${row.vout}`
+                const isSendOpen = sendOpenForOutput === rowKey
                 return (
                   <Box
                     key={i}
@@ -249,6 +257,19 @@ export default function StasDebugPanel() {
                       {row.confiscated ? (
                         <Chip size='small' label='confiscated' color='error' />
                       ) : null}
+                      <Box sx={{ flexGrow: 1 }} />
+                      <Button
+                        size='small'
+                        variant='outlined'
+                        disabled={!row.brc42KeyId || row.spendable === false || row.frozen}
+                        onClick={() => {
+                          setSendOpenForOutput(isSendOpen ? null : rowKey)
+                          setSendRecipient('')
+                          setSendResult(null)
+                        }}
+                      >
+                        {isSendOpen ? 'Cancel' : 'Send'}
+                      </Button>
                     </Stack>
                     <Typography
                       variant='caption'
@@ -273,6 +294,89 @@ export default function StasDebugPanel() {
                     >
                       tokenId: {row.tokenId?.slice(0, 16)}…
                     </Typography>
+
+                    {isSendOpen && (
+                      <Box sx={{ mt: 1, p: 1, bgcolor: 'background.paper', borderRadius: 1, border: '1px dashed', borderColor: 'divider' }}>
+                        <Typography variant='caption' display='block' sx={{ mb: 0.5 }}>
+                          Send this STAS UTXO to a recipient address. Signed via BRC-42
+                          ({row.brc42KeyId}); zero-fee transfer. Mainnet — real.
+                        </Typography>
+                        <Stack direction='row' spacing={1} alignItems='center'>
+                          <Box sx={{ flexGrow: 1 }}>
+                            <input
+                              type='text'
+                              value={sendRecipient}
+                              onChange={(e) => setSendRecipient(e.target.value)}
+                              placeholder='Recipient base58 address (e.g. 1AbC…)'
+                              style={{
+                                width: '100%',
+                                padding: '6px 8px',
+                                fontFamily: 'monospace',
+                                fontSize: 12,
+                                border: '1px solid #ccc',
+                                borderRadius: 4,
+                                boxSizing: 'border-box',
+                              }}
+                            />
+                          </Box>
+                          <Button
+                            size='small'
+                            variant='contained'
+                            disabled={!stas?.transfer || sending || !sendRecipient.trim()}
+                            startIcon={sending ? <CircularProgress size={12} /> : null}
+                            onClick={async () => {
+                              if (!stas?.transfer) return
+                              setSending(true)
+                              setSendResult(null)
+                              try {
+                                const result = await stas.transfer.transfer({
+                                  source: {
+                                    txid: row.txid,
+                                    vout: row.vout,
+                                    scriptHex: row.lockingScript ?? row.scriptHex ?? '',
+                                    satoshis: row.outputSatoshis ?? amount,
+                                    brc42KeyId: row.brc42KeyId,
+                                  },
+                                  recipientAddress: sendRecipient.trim(),
+                                })
+                                if (result.ok) {
+                                  setSendResult({
+                                    ok: true,
+                                    message: `Broadcast ✓ txid=${result.txid}`,
+                                  })
+                                  setSendOpenForOutput(null)
+                                  loadStas()
+                                } else {
+                                  setSendResult({
+                                    ok: false,
+                                    message: result.reason ?? 'transfer failed',
+                                  })
+                                }
+                              } catch (e) {
+                                setSendResult({
+                                  ok: false,
+                                  message: e instanceof Error ? e.message : String(e),
+                                })
+                              } finally {
+                                setSending(false)
+                              }
+                            }}
+                          >
+                            {sending ? 'Sending…' : 'Send'}
+                          </Button>
+                        </Stack>
+                        {sendResult && (
+                          <Typography
+                            variant='caption'
+                            display='block'
+                            color={sendResult.ok ? 'success.main' : 'error'}
+                            sx={{ mt: 0.5, fontFamily: 'monospace', fontSize: 11, wordBreak: 'break-all' }}
+                          >
+                            {sendResult.message}
+                          </Typography>
+                        )}
+                      </Box>
+                    )}
                   </Box>
                 )
               })}

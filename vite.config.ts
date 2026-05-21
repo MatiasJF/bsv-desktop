@@ -28,6 +28,10 @@ export default defineConfig({
     include: [
       'dxs-bsv-token-sdk/bsv',
       'dxs-bsv-token-sdk/dstas',
+      // stas-js + its bsv-js peer for the BRC-100 STAS transfer path.
+      'stas-js',
+      'stas-js/lib/stas',
+      'bsv',
     ],
   },
 });
