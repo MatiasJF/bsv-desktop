@@ -24,12 +24,17 @@ import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 
 // Old bsv-js + stas-js are CJS — pull them in via require shims that Vite
 // pre-bundles. See vite.config.ts optimizeDeps.
+//
+// Note on the explicit file paths: stas-js's package.json points `module` at
+// `dist/index` but ships no `dist/` folder. Vite's ESM resolver tries `module`
+// first and 404s. Importing `stas-js/index.js` and `stas-js/lib/stas.js`
+// directly side-steps the broken field.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const bsv: any = require('bsv');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const stasJs: any = require('stas-js');
+const stasJs: any = require('stas-js/index.js');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const stasInternals: any = require('stas-js/lib/stas');
+const stasInternals: any = require('stas-js/lib/stas.js');
 const SIGHASH: number = stasInternals.sighash;
 
 const ORIGINATOR = 'admin.stas-transfer';

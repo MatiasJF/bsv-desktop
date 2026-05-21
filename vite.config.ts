@@ -29,8 +29,11 @@ export default defineConfig({
       'dxs-bsv-token-sdk/bsv',
       'dxs-bsv-token-sdk/dstas',
       // stas-js + its bsv-js peer for the BRC-100 STAS transfer path.
-      'stas-js',
-      'stas-js/lib/stas',
+      // Explicit file paths — stas-js's package.json points `module` at
+      // `dist/index` but ships no `dist/` folder, so plain `stas-js`
+      // resolution fails. Bypass via the file paths directly.
+      'stas-js/index.js',
+      'stas-js/lib/stas.js',
       'bsv',
     ],
   },
