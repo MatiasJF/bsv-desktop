@@ -236,6 +236,35 @@ export class StasTransferService {
       return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
     }
 
+    // ----- diagnostics — log the wallet-built tx structure -----
+    // STAS-engine evaluation rejects with empty-stack-at-end when the tx
+    // layout doesn't match what partialSTASUnlockingScript described. These
+    // logs let us see what the wallet actually built vs what we're asserting.
+    /* eslint-disable no-console */
+    try {
+      console.log('[stas-transfer] tx inputs:', tx.inputs.length);
+      for (let i = 0; i < tx.inputs.length; i++) {
+        const inp = tx.inputs[i];
+        const prevTxidHex =
+          typeof inp.prevTxId === 'string'
+            ? inp.prevTxId
+            : Buffer.from(inp.prevTxId).toString('hex');
+        console.log(`  in ${i}: ${prevTxidHex}.${inp.outputIndex}`);
+      }
+      console.log('[stas-transfer] tx outputs:', tx.outputs.length);
+      for (let v = 0; v < tx.outputs.length; v++) {
+        const out = tx.outputs[v];
+        const sHex = out.script.toHex();
+        console.log(
+          `  out ${v}: ${out.satoshis} sats, len=${sHex.length / 2}, head=${sHex.substring(0, 24)}`
+        );
+      }
+      console.log('[stas-transfer] source STAS sats=', source.satoshis, 'recipientPkh=', recipientPkhHex);
+    } catch {
+      /* never block flow on logging */
+    }
+    /* eslint-enable no-console */
+
     // 6. Identify the wallet-added change output. Our STAS is vout 0; wallet
     //    typically appends change at vout 1+. Pick the first standard P2PKH.
     let paymentSegment: { satoshis: number; publicKey: string } | null = null;
@@ -249,6 +278,9 @@ export class StasTransferService {
         break;
       }
     }
+    /* eslint-disable no-console */
+    console.log('[stas-transfer] paymentSegment:', paymentSegment, 'isZeroFee:', paymentSegment === null);
+    /* eslint-enable no-console */
 
     // 7. partialSTASUnlockingScript populates tx.inputs[0].script with the
     //    engine push-data prefix.
