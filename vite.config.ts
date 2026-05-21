@@ -1,22 +1,26 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import path from 'path';
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // Polyfill Node globals (Buffer, process, global, etc.) for the
+    // browser. Needed by legacy bsv@1.5.6 (which stas-js depends on) —
+    // it references Node primitives throughout its module bodies.
+    nodePolyfills({
+      globals: { Buffer: true, global: true, process: true },
+      protocolImports: true,
+    }),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
   },
   base: './',
-  // bsv@1.5.6 (legacy bsv-js used by stas-js) references the Node global
-  // identifier directly. The browser has `globalThis` but not `global`,
-  // so map one to the other at bundle time.
-  define: {
-    global: 'globalThis',
-  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
