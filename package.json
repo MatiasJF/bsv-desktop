@@ -46,7 +46,7 @@
     "cors": "^2.8.6",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.4",
-    "dxs-bsv-token-sdk": "file:../dxs-bsv-token-sdk",
+    "dxs-bsv-token-sdk": "file:./vendor/dxs-bsv-token-sdk",
     "electron-log": "^5.4.3",
     "electron-updater": "^6.7.3",
     "express": "^4.21.2",
