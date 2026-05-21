@@ -19,7 +19,68 @@
  * the cap protects against pathological inputs.
  */
 
-import { Beef, Transaction, type MerklePath, type WalletInterface } from '@bsv/sdk';
+import { Beef, MerklePath, Transaction, type WalletInterface } from '@bsv/sdk';
+import { wocFetch } from '../../utils/RateLimitedFetch';
+
+const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv/main';
+
+function hexToBytes(hex: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    out.push(parseInt(hex.substring(i, i + 2), 16));
+  }
+  return out;
+}
+
+async function fetchRawTxFromWoc(txid: string): Promise<number[] | null> {
+  try {
+    const res = await wocFetch.fetch(`${WOC_BASE}/tx/${txid}/hex`);
+    if (!res.ok) return null;
+    const hex = (await res.text()).trim();
+    if (!/^[0-9a-f]+$/i.test(hex)) return null;
+    return hexToBytes(hex);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchMerklePathFromWoc(txid: string): Promise<MerklePath | null> {
+  try {
+    // WoC's "tsc" proof variant; we convert to BUMP via the SDK.
+    const res = await wocFetch.fetch(`${WOC_BASE}/tx/${txid}/proof/tsc`);
+    if (!res.ok) return null;
+    const arr = await res.json();
+    const tsc = Array.isArray(arr) ? arr[0] : arr;
+    if (!tsc || typeof tsc.index !== 'number' || !Array.isArray(tsc.nodes)) return null;
+    // Build a minimal BUMP path: 1 level if a single coinbase, otherwise
+    // walk the nodes from leaf upward. The SDK provides no TSC->BUMP
+    // helper, so we construct the path[]] structure by hand: level 0 has
+    // the txid at `index`; each subsequent level walks up halving the
+    // index. The tsc.nodes give us the sibling hashes per level.
+    const path: any[] = [
+      [{ offset: tsc.index, hash: txid, txid: true }],
+    ];
+    let idx = tsc.index;
+    for (const node of tsc.nodes) {
+      const siblingOffset = idx ^ 1;
+      const hashHex = typeof node === 'string' ? node : node?.hash;
+      // '*' means "duplicate the other side" — we omit then.
+      if (hashHex && hashHex !== '*') {
+        path.push([{ offset: siblingOffset, hash: hashHex }]);
+      }
+      idx >>= 1;
+    }
+    const blockHeight =
+      typeof tsc.blockHeight === 'number'
+        ? tsc.blockHeight
+        : typeof tsc.height === 'number'
+          ? tsc.height
+          : 0;
+    return new MerklePath(blockHeight, path as any);
+  } catch {
+    return null;
+  }
+}
 
 const COINBASE_TXID =
   '0000000000000000000000000000000000000000000000000000000000000000';
@@ -77,24 +138,28 @@ export async function buildChainedAtomicBeef(
     seen.add(currentTxid);
     if (depth > maxDepthSeen) maxDepthSeen = depth;
 
-    // 1. fetch rawTx
-    let rawTxRes: any;
+    // 1. fetch rawTx — Services first, then WoC fallback. Some txs the
+    //    wallet has touched via internalize don't reappear through
+    //    Services.getRawTx; WoC has them as long as they're on chain.
+    let rawTxBytes: number[] | null = null;
     try {
-      rawTxRes = await services.getRawTx(currentTxid);
-    } catch (err) {
-      throw new Error(
-        `chained BEEF: getRawTx(${currentTxid}) threw: ${err instanceof Error ? err.message : String(err)}`
-      );
+      const r = await services.getRawTx(currentTxid);
+      if (r?.rawTx) rawTxBytes = r.rawTx as number[];
+    } catch {
+      /* fall through to WoC */
     }
-    if (!rawTxRes?.rawTx) {
+    if (!rawTxBytes) {
+      rawTxBytes = await fetchRawTxFromWoc(currentTxid);
+    }
+    if (!rawTxBytes) {
       throw new Error(
-        `chained BEEF: getRawTx(${currentTxid}) returned no rawTx (${rawTxRes?.error?.message ?? 'no error message'})`
+        `chained BEEF: no rawTx for ${currentTxid} (neither Services nor WoC returned bytes)`
       );
     }
 
-    const tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
+    const tx = Transaction.fromBinary(rawTxBytes);
 
-    // 2. try to get a merkle proof
+    // 2. try to get a merkle proof — Services first, then WoC.
     let mp: MerklePath | undefined;
     try {
       const mpRes: any = await services.getMerklePath(currentTxid);
@@ -102,7 +167,11 @@ export async function buildChainedAtomicBeef(
         mp = mpRes.merklePath as MerklePath;
       }
     } catch {
-      // ignore: tx is mempool / no proof yet, will recurse on inputs
+      /* fall through */
+    }
+    if (!mp) {
+      const fallback = await fetchMerklePathFromWoc(currentTxid);
+      if (fallback) mp = fallback;
     }
 
     if (mp) {

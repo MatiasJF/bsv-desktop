@@ -13,9 +13,8 @@
  */
 
 import type { WalletInterface } from '@bsv/sdk';
-import { Beef, Transaction } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
-import { STAS_BASKET } from '../../constants/baskets';
+import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -112,50 +111,17 @@ export class StasTransferService {
       return { ok: false, reason: `script build: ${errMsg(err)}` };
     }
 
-    // 4. Build inputBEEF SPECIFICALLY for the source STAS tx. listOutputs's
-    //    BEEF sometimes omits the very tx we're spending (returns only the
-    //    source-of-source ancestors), which made createAction reject with
-    //    "must contain proof data for possibly known <txid>".
-    //
-    //    The direct path: fetch source rawTx + merkle path via Services, build
-    //    a single-tx BEEF. If Services doesn't surface a proof (rare for
-    //    confirmed UTXOs), fall through to listOutputs's BEEF as a last resort.
+    // 4. Build inputBEEF for the source STAS tx via buildChainedAtomicBeef,
+    //    which now falls back to WoC when wallet Services doesn't return a
+    //    rawTx or merkle path. Same helper the receive side uses; here we
+    //    take its `.beef` (non-atomic) output for createAction's inputBEEF.
     let inputBEEF: number[];
     try {
-      const services: any = (this.wallet as any).getServices?.();
-      const [rawTxRes, mpRes] = await Promise.all([
-        services?.getRawTx(source.txid).catch(() => null),
-        services?.getMerklePath(source.txid).catch(() => null),
-      ]);
-
-      if (rawTxRes?.rawTx && mpRes?.merklePath) {
-        const beef = new Beef();
-        const tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
-        tx.merklePath = mpRes.merklePath;
-        beef.mergeTransaction(tx);
-        inputBEEF = beef.toBinary();
-      } else {
-        // Fallback: hand over whatever the wallet's basket cache has. May or
-        // may not include our specific source.
-        const lor: any = await this.wallet.listOutputs(
-          {
-            basket: STAS_BASKET,
-            include: 'entire transactions',
-            limit: 500,
-          } as any,
-          ORIGINATOR
-        );
-        if (!Array.isArray(lor?.BEEF) || lor.BEEF.length === 0) {
-          return {
-            ok: false,
-            reason:
-              `no proof data for source ${source.txid} — Services returned ` +
-              `rawTx=${!!rawTxRes?.rawTx} merklePath=${!!mpRes?.merklePath}; ` +
-              'listOutputs returned no BEEF either',
-          };
-        }
-        inputBEEF = lor.BEEF;
-      }
+      const built = await buildChainedAtomicBeef({
+        wallet: this.wallet,
+        txid: source.txid,
+      });
+      inputBEEF = built.beef;
     } catch (err) {
       return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
     }
