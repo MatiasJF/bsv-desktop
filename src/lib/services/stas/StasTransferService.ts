@@ -298,18 +298,39 @@ export class StasTransferService {
         return { ok: false, reason: `unlocking assembly: ${errMsg(err)}` };
       }
 
-      // 13. signAction.
+      // 13. signAction. Pass acceptDelayedBroadcast:false so the wallet
+      //     attempts to broadcast immediately (else it queues for the monitor
+      //     worker which may delay or silently fail).
       let signResp: any;
       try {
         signResp = await this.wallet.signAction(
           {
             reference: signable.reference,
             spends: { 0: { unlockingScript: unlockingScriptHex } },
+            options: { acceptDelayedBroadcast: false } as any,
           } as any,
           ORIGINATOR
         );
       } catch (err) {
         return { ok: false, reason: `signAction: ${errMsg(err)}` };
+      }
+
+      /* eslint-disable no-console */
+      console.log('[stas-transfer] signAction result:', signResp);
+      /* eslint-enable no-console */
+
+      // signAction returns txid as soon as the tx is finalized, regardless of
+      // whether broadcast succeeded. Inspect sendWithResults to see if any
+      // input/output was rejected by mAPI. Surface real broadcast failures.
+      const sendResults: any[] = Array.isArray(signResp?.sendWithResults)
+        ? signResp.sendWithResults
+        : [];
+      const failed = sendResults.find((r) => r?.status === 'failed');
+      if (failed) {
+        return {
+          ok: false,
+          reason: `broadcast failed: ${JSON.stringify(failed)} (txid was ${signResp?.txid})`,
+        };
       }
 
       return { ok: true, txid: signResp?.txid };
