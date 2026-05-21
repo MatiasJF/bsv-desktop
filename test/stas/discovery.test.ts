@@ -102,7 +102,10 @@ describe('StasDiscoveryService.scan', () => {
     expect(result.registeredOutpoints[0].txid).toBe(txid)
   })
 
-  test('defers unconfirmed (height 0) UTXOs without calling registration', async () => {
+  test('mempool (height 0) UTXOs still go through registration (Task 4c: chained BEEF handles it)', async () => {
+    // Previously the discovery loop deferred height === 0. Now Bitails surfaces
+    // mempool STAS and buildChainedAtomicBeef walks input ancestry to a confirmed
+    // bump — registration is called regardless of height.
     const deriver = mkDeriver()
     const k1 = await deriver.deriveReceiveKey(1)
     const { rawTx, txid } = makeDstasTxFor(k1.ownerFieldHash160)
@@ -135,9 +138,9 @@ describe('StasDiscoveryService.scan', () => {
     const result = await svc.scan()
     expect(result.dstas).toBe(1)
     expect(result.ownedAndDstas).toBe(1)
-    expect(result.deferred).toBe(1)
-    expect(result.registered).toBe(0)
-    expect(registerCalls).toHaveLength(0)
+    expect(result.deferred).toBe(0)
+    expect(result.registered).toBe(1)
+    expect(registerCalls).toHaveLength(1)
   })
 
   test('bootstrap mode: hwm=0 caps the scan at the small bootstrap window', async () => {

@@ -318,11 +318,13 @@ export class StasDiscoveryService {
           if (keyIndex === undefined) continue;
           result.ownedAndDstas++;
 
-          // Confirmed-only MVP — defer mempool UTXOs.
-          if (!utxo.height || utxo.height === 0) {
-            result.deferred++;
-            continue;
-          }
+          // Mempool tolerance: previously this branch deferred when the
+          // indexer reported height 0. Bitails surfaces unconfirmed STAS too,
+          // and Task 4c's buildChainedAtomicBeef walks back through inputs to
+          // a confirmed ancestor, so mempool UTXOs are no longer special-cased.
+          // If chained BEEF assembly fails (e.g. inputs not yet fetchable), the
+          // registration returns false and the discovery loop records the
+          // error; the next scan retries.
 
           const reg = await this.deps.registration.register({
             txid: utxo.txid,
