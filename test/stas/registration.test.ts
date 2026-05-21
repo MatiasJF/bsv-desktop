@@ -102,14 +102,55 @@ describe('StasRegistration.register', () => {
     expect(ci.flagsHex).toBe('03')
   })
 
-  test('defers when getMerklePath has no proof (confirmed-only MVP)', async () => {
+  test('mempool target (no proof on target) walks back through inputs to a confirmed ancestor', async () => {
+    // Mempool target tx with one input; ancestor has the merkle proof.
     const ownerHash = 'cd'.repeat(20)
-    const { rawTx, txid } = makeDstasTx(ownerHash)
-    const { wallet, calls } = mkWallet(rawTx, txid, { withProof: false })
+    const ancestor = makeDstasTx('ee'.repeat(20))
+    const targetTx = new Transaction()
+    // Reference the ancestor as the input (one input, no script needed for this
+    // unit test — the validator never runs because internalizeAction is stubbed).
+    targetTx.addInput({
+      sourceTransaction: Transaction.fromBinary(ancestor.rawTx),
+      sourceOutputIndex: 0,
+      unlockingScript: LockingScript.fromHex(''),
+      sequence: 0xffffffff,
+    })
+    targetTx.addOutput({
+      lockingScript: LockingScript.fromHex(
+        // Tiny push-only script; the test only cares about wiring.
+        '00',
+      ),
+      satoshis: 100,
+    })
+    const targetRaw = targetTx.toBinary()
+    const targetId = targetTx.id('hex')
+
+    const ancestorMp = new MerklePath(100, [
+      [{ offset: 0, hash: ancestor.txid, txid: true }],
+    ])
+    const calls: CapturedCall[] = []
+    const wallet: any = {
+      internalizeAction: async (args: any, originator: any) => {
+        calls.push({ args, originator })
+        return { accepted: true }
+      },
+      getServices: () => ({
+        getRawTx: async (id: string) => {
+          if (id === targetId) return { rawTx: targetRaw }
+          if (id === ancestor.txid) return { rawTx: ancestor.rawTx }
+          throw new Error(`unexpected getRawTx for ${id}`)
+        },
+        getMerklePath: async (id: string) => {
+          // Target tx is mempool → no proof. Ancestor is confirmed.
+          if (id === ancestor.txid) return { merklePath: ancestorMp }
+          return {}
+        },
+      }),
+    }
 
     const reg = new StasRegistration(wallet, 'test-identity', 'main')
     const result = await reg.register({
-      txid,
+      txid: targetId,
       vout: 0,
       tokenSatoshis: 100,
       ownerFieldHash160: ownerHash,
@@ -124,8 +165,10 @@ describe('StasRegistration.register', () => {
       },
     })
 
-    expect(result.registered).toBe(false)
-    expect(result.reason).toMatch(/no merkle proof/)
-    expect(calls).toHaveLength(0)
+    // The chained BEEF was assembled and internalizeAction was called.
+    expect(result.registered).toBe(true)
+    expect(calls).toHaveLength(1)
+    const txBytes = Array.from(calls[0].args.tx as number[])
+    expect(txBytes.slice(0, 4)).toEqual([1, 1, 1, 1]) // AtomicBEEF prefix
   })
 })

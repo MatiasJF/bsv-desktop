@@ -4,17 +4,17 @@
  *
  * Flow:
  *   1. defensive idempotency check via stas:query findStasOutputByOutpoint
- *   2. fetch raw tx and merkle path via `wallet.getServices()` — confirmed-only
- *      for MVP, bails out if no merkle path is available yet
- *   3. assemble an AtomicBEEF (Transaction + MerklePath -> Beef -> toBinaryAtomic)
- *   4. `wallet.internalizeAction({ outputs: [{ protocol: 'basket insertion', ... }] })`
- *   5. link the satellite rows (stas_tokens + stas_outputs) to the new
+ *   2. build a chained AtomicBEEF that walks back through inputs until every
+ *      leaf has a merkle proof — so mempool txs work too (see OQ-8 in
+ *      notes/OPEN-QUESTIONS.md for the rationale)
+ *   3. `wallet.internalizeAction({ outputs: [{ protocol: 'basket insertion', ... }] })`
+ *   4. link the satellite rows (stas_tokens + stas_outputs) to the new
  *      wallet-toolbox `outputs.outputId`
  */
 
 import type { WalletInterface } from '@bsv/sdk';
-import { Beef, Transaction } from '@bsv/sdk';
 import { STAS_BASKET } from '../../constants/baskets';
+import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 import type { ParsedDstas } from './dstasParser';
 
 export interface RegisterStasArgs {
@@ -68,64 +68,19 @@ export class StasRegistration {
       if (!isQueryUnavailable(err)) throw err;
     }
 
-    // 2. Fetch raw tx + merkle proof from the wallet's own services. This means
-    //    the wallet uses whichever indexer it's already configured for (WoC
-    //    today) — we don't reinvent that surface.
-    const services: any = (this.wallet as any).getServices?.();
-    if (!services) {
-      return { registered: false, txid, vout, reason: 'wallet.getServices() unavailable' };
-    }
-
-    let rawTxRes: any;
-    try {
-      rawTxRes = await services.getRawTx(txid);
-    } catch (err) {
-      return {
-        registered: false,
-        txid,
-        vout,
-        reason: `getRawTx failed: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    if (!rawTxRes?.rawTx) {
-      return {
-        registered: false,
-        txid,
-        vout,
-        reason: rawTxRes?.error?.message ?? 'getRawTx returned no rawTx',
-      };
-    }
-
-    let mpRes: any;
-    try {
-      mpRes = await services.getMerklePath(txid);
-    } catch (err) {
-      return {
-        registered: false,
-        txid,
-        vout,
-        reason: `getMerklePath failed: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    if (!mpRes?.merklePath) {
-      // Confirmed-only MVP — defer until the tx confirms.
-      return { registered: false, txid, vout, reason: 'no merkle proof yet (deferred)' };
-    }
-
-    // 3. Build AtomicBEEF.
+    // 2. Build a chained AtomicBEEF. Walks back through inputs until every
+    //    leaf input has a merkle proof; lets us internalize mempool STAS by
+    //    chaining the target tx + its parents to a confirmed source.
     let atomicBeef: number[];
     try {
-      const tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
-      tx.merklePath = mpRes.merklePath;
-      const beef = new Beef();
-      beef.mergeTransaction(tx);
-      atomicBeef = beef.toBinaryAtomic(txid);
+      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid });
+      atomicBeef = built.atomicBeef;
     } catch (err) {
       return {
         registered: false,
         txid,
         vout,
-        reason: `BEEF assembly failed: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `chained BEEF assembly failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
 
