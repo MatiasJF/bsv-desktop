@@ -193,7 +193,10 @@ export class StasTransferService {
             ],
             description: 'STAS transfer',
             options: {
-              acceptDelayedBroadcast: false,
+              // Note: acceptDelayedBroadcast not set to false here, otherwise
+              // the wallet errors with "Undelayed createAction or signAction
+              // results require review" when prior failed attempts are queued.
+              // Let the wallet queue + monitor worker handle broadcast.
               randomizeOutputs: false,
             },
           } as any,
@@ -298,16 +301,15 @@ export class StasTransferService {
         return { ok: false, reason: `unlocking assembly: ${errMsg(err)}` };
       }
 
-      // 13. signAction. Pass acceptDelayedBroadcast:false so the wallet
-      //     attempts to broadcast immediately (else it queues for the monitor
-      //     worker which may delay or silently fail).
+      // 13. signAction. No acceptDelayedBroadcast override — the wallet
+      //     queues and the monitor worker broadcasts asynchronously. The
+      //     monitor's TaskSendWaiting handles relay + retry + WoC fallback.
       let signResp: any;
       try {
         signResp = await this.wallet.signAction(
           {
             reference: signable.reference,
             spends: { 0: { unlockingScript: unlockingScriptHex } },
-            options: { acceptDelayedBroadcast: false } as any,
           } as any,
           ORIGINATOR
         );
