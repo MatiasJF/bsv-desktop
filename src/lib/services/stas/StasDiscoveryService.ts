@@ -22,6 +22,26 @@ import type { StasRegistration } from './StasRegistration';
 import type { IndexerClient } from './IndexerClient';
 import { stasQuery } from './stasIpc';
 
+/**
+ * Extract the owner hash160 from a CLASSIC STAS locking script.
+ *
+ * Classic STAS contracts always begin with a canonical P2PKH-shaped prefix
+ * containing the owner's hash160, immediately followed by OP_VERIFY:
+ *
+ *   76 a9 14 <20-byte owner-hash160> 88 ac 69  …STAS engine bytes…
+ *   ^ OP_DUP                          ^^ ^^ ^^ OP_EQUALVERIFY/OP_CHECKSIG/OP_VERIFY
+ *
+ * Returns the hash160 as 40-hex-char lowercase, or null if the script doesn't
+ * match. This lets us classify and own classic STAS UTXOs even though our
+ * DSTAS parser (from the dxs SDK) returns null for them.
+ */
+function tryParseClassicStasOwner(scriptHex: string): string | null {
+  if (typeof scriptHex !== 'string' || scriptHex.length < 56) return null;
+  if (!scriptHex.startsWith('76a914')) return null;
+  if (scriptHex.substring(46, 52) !== '88ac69') return null;
+  return scriptHex.substring(6, 46);
+}
+
 export interface ScanResult {
   scannedAddresses: number;
   /** Total UTXOs the indexer returned across all scanned addresses. */
@@ -111,12 +131,32 @@ export class StasDiscoveryService {
     for (let vout = 0; vout < tx.outputs.length; vout++) {
       const txout = tx.outputs[vout];
       const lockingScriptHex: string = txout.lockingScript.toHex();
-      const parsed: ParsedDstas | null = parseDstasLockingScript(lockingScriptHex);
+
+      // Try DSTAS first; for classic STAS fall back to extracting the owner
+      // hash160 from the canonical P2PKH+OP_VERIFY prefix.
+      let parsed: ParsedDstas | null = parseDstasLockingScript(lockingScriptHex);
+      let ownerFieldHash160: string | undefined = parsed?.ownerFieldHash160;
       if (!parsed) {
+        const classicOwner = tryParseClassicStasOwner(lockingScriptHex);
+        if (classicOwner) {
+          ownerFieldHash160 = classicOwner;
+          parsed = {
+            ownerFieldHash160: classicOwner,
+            tokenId: '',
+            freezeEnabled: false,
+            confiscationEnabled: false,
+            flagsHex: '',
+            serviceFields: [],
+          };
+        }
+      }
+
+      if (!parsed || !ownerFieldHash160) {
         out.outputs.push({ vout, matched: false });
         continue;
       }
-      const keyIndex = ownerMap.get(parsed.ownerFieldHash160);
+
+      const keyIndex = ownerMap.get(ownerFieldHash160);
       if (keyIndex === undefined) {
         out.outputs.push({ vout, matched: false });
         continue;
@@ -126,7 +166,7 @@ export class StasDiscoveryService {
         txid,
         vout,
         tokenSatoshis: txout.satoshis ?? 0,
-        ownerFieldHash160: parsed.ownerFieldHash160,
+        ownerFieldHash160,
         brc42KeyId: `recv ${keyIndex}`,
         parsed,
       });
@@ -209,9 +249,16 @@ export class StasDiscoveryService {
         result.candidates++;
         try {
           // Idempotency pre-check — saves fetching tx/proof for known outpoints.
+          // Counts already-known UTXOs into dstas + ownedAndDstas too, so the
+          // panel reflects "STAS the wallet recognises at the scanned range"
+          // rather than just "newly registered this scan". Without this,
+          // a re-scan after auto-discovery shows DSTAS 0 / Owned 0 even though
+          // every UTXO is wallet-owned — confusing.
           try {
             const existing = await stasQuery(identityKey, chain, 'findStasOutputByOutpoint', [utxo.txid, utxo.vout]);
             if (existing) {
+              result.dstas++;
+              result.ownedAndDstas++;
               result.skippedAlreadyKnown++;
               continue;
             }

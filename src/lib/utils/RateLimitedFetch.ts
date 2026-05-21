@@ -1,13 +1,15 @@
 /**
  * Rate-limited fetch queue with 429 retry/backoff.
  *
- * Caps outbound rate (default: 2 req/s) AND auto-retries when WoC returns
- * 429, with exponential backoff. Previously this class only spaced requests
- * out and surfaced 429s as ordinary failures — which meant a busy scan
- * (e.g. STAS gap-limit hitting 110 derived addresses) would silently lose
- * candidates whenever the wallet's other operations (balance polling,
- * Services calls in wallet-toolbox) burst alongside it. Result: STAS scan
- * shows Candidates 0 even when the indexer has the UTXO indexed.
+ * Caps outbound rate (default: 2 req/s) AND auto-retries on 429 with
+ * exponential backoff. Without retry, the STAS gap-limit scan (100+ addresses
+ * to Bitails / WoC) loses any candidate that happens to be 429'd — the
+ * IndexerClient catches errors and silently treats them as []. So a real
+ * STAS UTXO at one of those addresses can be missed entirely and the scan
+ * reports Candidates 0 even when the indexer has it.
+ *
+ * Honours `Retry-After` when the server sends it; otherwise backs off
+ * 1.5s, 3s, 6s across three attempts before surfacing the 429 to the caller.
  */
 class RateLimitedFetch {
   private queue: Array<{
@@ -41,14 +43,12 @@ class RateLimitedFetch {
       const res = await fetch(url, options)
       if (res.status !== 429) return res
       if (attempt === this.maxRetries) return res
-      // exponential backoff: 1.5s, 3s, 6s; honour Retry-After if present
       const retryAfter = parseInt(res.headers.get('Retry-After') ?? '', 10)
       const backoff = Number.isFinite(retryAfter) && retryAfter > 0
         ? retryAfter * 1000
         : 1500 * Math.pow(2, attempt)
       await new Promise((r) => setTimeout(r, backoff))
     }
-    // unreachable; loop returns on the last attempt
     return fetch(url, options)
   }
 
@@ -69,7 +69,6 @@ class RateLimitedFetch {
       item.reject(error as Error)
     }
 
-    // Ensure minimum interval between requests
     const elapsed = Date.now() - startTime
     const delay = Math.max(0, this.minInterval - elapsed)
 
@@ -79,6 +78,7 @@ class RateLimitedFetch {
   }
 }
 
-// Singleton instance for WhatsOnChain API calls. 2 req/s leaves headroom for
-// wallet-toolbox's own concurrent WoC traffic; 429s are auto-retried.
+// Singleton instance for WhatsOnChain / Bitails API calls. 2 req/s leaves
+// headroom for wallet-toolbox's own concurrent WoC traffic; 429s auto-retry
+// with backoff.
 export const wocFetch = new RateLimitedFetch(2)
