@@ -98,14 +98,14 @@ export class StasTransferService {
     }
 
     // 3. Build the new STAS locking script — engine + tokenId unchanged, only
-    //    the owner-field hash160 swaps.
+    //    the owner-field hash160 swaps. `updateStasScript` and `getVersion`
+    //    operate on the HEX STRING form of the script (they regex on it),
+    //    NOT a parsed Script object. Pass scriptHex directly.
     let newStasScriptHex: string;
     let stasVersion: number;
     try {
-      const sourceScript = bsv.Script.fromHex(source.scriptHex);
-      const newScript = updateStasScript(recipientPkhHex, sourceScript);
-      newStasScriptHex = newScript.toHex();
-      stasVersion = getVersion(sourceScript);
+      newStasScriptHex = updateStasScript(recipientPkhHex, source.scriptHex);
+      stasVersion = getVersion(source.scriptHex);
     } catch (err) {
       return { ok: false, reason: `script build: ${errMsg(err)}` };
     }
