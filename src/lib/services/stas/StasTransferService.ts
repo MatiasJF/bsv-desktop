@@ -143,9 +143,14 @@ export class StasTransferService {
       );
       previousBasketTarget = res?.previous ?? null;
       /* eslint-disable-next-line no-console */
-      console.log('[stas-transfer] basket UTXO target: previous=', previousBasketTarget, 'set to 0');
-    } catch {
-      /* best effort; tx may still fragment */
+      console.log('[stas-transfer] basket UTXO target: previous=', previousBasketTarget, 'set to 0; updated rows=', res?.updated);
+    } catch (err) {
+      /* eslint-disable-next-line no-console */
+      console.warn(
+        '[stas-transfer] setDefaultBasketUTXOTarget failed — fragmentation will likely break the engine. ' +
+        'Likely cause: stale dist-electron build. Fully restart `npm run dev`. Underlying error:',
+        err
+      );
     }
 
     // From here, ensure we restore the basket target on every exit path.
