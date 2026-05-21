@@ -170,7 +170,11 @@ export class StasTransferService {
           inputs: [
             {
               outpoint: `${source.txid}.${source.vout}`,
-              unlockingScriptLength: 500,
+              // Classic STAS unlocking scripts run 3–4 KB: the engine
+              // push-data segments + the full SIGHASH preimage hex
+              // (~700 bytes) + DER signature (~73) + pubkey (33). 4500
+              // is generous; the wallet uses this to size the fee.
+              unlockingScriptLength: 4500,
               inputDescription: 'STAS being transferred',
             },
           ],
