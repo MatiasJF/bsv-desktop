@@ -186,7 +186,15 @@ export class StasTransferService {
             },
           ],
           description: 'STAS transfer',
-          options: { acceptDelayedBroadcast: false },
+          options: {
+            acceptDelayedBroadcast: false,
+            // CRITICAL: the STAS engine assumes the new STAS UTXO is at vout 0.
+            // Without this flag, wallet-toolbox shuffles output order for
+            // privacy and places fragmentation outputs ahead of ours. The
+            // engine then reads vout 0 (a wallet P2PKH) instead of our STAS
+            // and rejects with "top stack must be truthy after eval".
+            randomizeOutputs: false,
+          },
         } as any,
         ORIGINATOR
       );
