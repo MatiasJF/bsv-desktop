@@ -1,40 +1,41 @@
 /**
- * StasTransferService — spend a STAS UTXO via the full BRC-100 path:
- * `wallet.createAction` + `wallet.signAction`. The wallet picks BSV funding
- * inputs from the default basket and adds change automatically; we only sign
- * the STAS input ourselves via `wallet.createSignature` with the BRC-42
- * derivation that owns the STAS.
+ * StasTransferService — STAS transfer via stas-js's transferWithCallback path.
  *
- * No private keys exposed to UI. Wallet handles its own basket reconciliation
- * (the spent STAS leaves stas-tokens; the change replenishes default).
+ * createAction + signAction was the original target but wallet-toolbox's
+ * change-fragmentation (numberOfDesiredUTXOs: 144 by default) breaks the STAS
+ * engine, which assumes exactly 2 outputs (STAS at vout 0, BSV change at
+ * vout 1). No createAction option suppresses fragmentation.
  *
- * stas-js + bsv (1.5.6) loaded lazily on transfer() — they never touch app
- * boot, so any browser-side init failure is confined to this call.
+ * This service builds the transfer tx via `stas-js.transferWithCallback`, which
+ * produces the exact 2-output layout the engine expects. We sign both the STAS
+ * input (BRC-42 derivation) and the BSV funding input (BRC-29 derivation) via
+ * `wallet.createSignature` — no private keys exposed to the renderer. Broadcast
+ * goes through WoC directly.
+ *
+ * Trade-off: wallet's basket reconciliation lags until its monitor sees the
+ * spend on chain. Acceptable for the demo; basket eventually reconciles.
  */
 
 import type { WalletInterface } from '@bsv/sdk';
-import { Beef } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
-import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 import { stasQuery } from './stasIpc';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
-  stasInternals: any;
+  stasJs: any;
   SIGHASH: number;
 }> {
-  // Dynamic ESM imports — `require` doesn't exist in the browser/Vite world.
-  // Vite's optimizeDeps pre-bundles these CJS packages so we can import them.
-  // CJS modules expose their `module.exports` as the default export under ESM
-  // interop, so unwrap `.default` if present.
   const bsvMod: any = await import('bsv');
   const bsv = bsvMod.default ?? bsvMod;
+  const stasJsMod: any = await import('stas-js/index.js');
+  const stasJs = stasJsMod.default ?? stasJsMod;
   const stasInternalsMod: any = await import('stas-js/lib/stas.js');
   const stasInternals = stasInternalsMod.default ?? stasInternalsMod;
-  return { bsv, stasInternals, SIGHASH: stasInternals.sighash };
+  return { bsv, stasJs, SIGHASH: stasInternals.sighash };
 }
 
 const ORIGINATOR = 'admin.stas-transfer';
+const BRC29_PROTOCOL_ID: any = [2, '3241645161d8'];
 
 export interface StasTransferArgs {
   source: {
@@ -65,21 +66,14 @@ export class StasTransferService {
   async transfer(args: StasTransferArgs): Promise<StasTransferResult> {
     const { source, recipientAddress } = args;
 
-    // Lazy-load. Any failure here is reported as a normal error, not a crash.
-    let bsv: any, stasInternals: any, SIGHASH: number;
+    let bsv: any, stasJs: any, SIGHASH: number;
     try {
-      ({ bsv, stasInternals, SIGHASH } = await loadStasDeps());
+      ({ bsv, stasJs, SIGHASH } = await loadStasDeps());
     } catch (err) {
       return { ok: false, reason: `load stas-js/bsv failed: ${errMsg(err)}` };
     }
 
-    const {
-      updateStasScript,
-      partialSTASUnlockingScript,
-      getVersion,
-    } = stasInternals;
-
-    // 1. Owner pubkey via BRC-42 (same derivation that owns the STAS).
+    // 1. STAS owner pubkey (BRC-42 derivation that owns the STAS).
     let ownerPubKey: any;
     try {
       const { publicKey } = await this.wallet.getPublicKey(
@@ -92,51 +86,147 @@ export class StasTransferService {
       );
       ownerPubKey = bsv.PublicKey.fromString(publicKey);
     } catch (err) {
-      return { ok: false, reason: `getPublicKey: ${errMsg(err)}` };
+      return { ok: false, reason: `getPublicKey (STAS owner): ${errMsg(err)}` };
     }
 
-    // 2. Validate recipient + extract hash160 (the STAS owner field).
-    let recipientPkhHex: string;
+    // 2. Pick a BSV UTXO from the wallet's default basket for fee funding.
+    let paymentUtxo: any;
+    let paymentPubKey: any;
+    let paymentDerivation: { protocolID: any; keyID: string; counterparty: any };
     try {
-      const addr = bsv.Address.fromString(recipientAddress);
-      recipientPkhHex = addr.hashBuffer.toString('hex');
+      const lor: any = await this.wallet.listOutputs(
+        {
+          basket: 'default',
+          include: 'locking scripts',
+          includeCustomInstructions: true,
+          limit: 100,
+        } as any,
+        ORIGINATOR
+      );
+      const outs: any[] = Array.isArray(lor?.outputs) ? lor.outputs : [];
+      // eslint-disable-next-line no-console
+      console.log(
+        '[stas-transfer] default basket outputs:',
+        outs.length,
+        outs.slice(0, 5).map((o) => ({
+          outpoint: o.outpoint,
+          sats: o.satoshis,
+          ci: o.customInstructions ? String(o.customInstructions).slice(0, 80) : undefined,
+        }))
+      );
+      const candidates = outs
+        .filter((o) => o.spendable !== false && (o.satoshis ?? 0) >= 500)
+        .sort((a, b) => (b.satoshis ?? 0) - (a.satoshis ?? 0));
+      if (candidates.length === 0) {
+        return {
+          ok: false,
+          reason: `no BSV UTXO with >= 500 sats in default basket (found ${outs.length} total)`,
+        };
+      }
+      const pick = candidates[0];
+      const [pTxid, pVoutStr] = String(pick.outpoint).split('.');
+      paymentUtxo = {
+        txid: pTxid,
+        vout: parseInt(pVoutStr, 10),
+        scriptPubKey: pick.lockingScript,
+        satoshis: pick.satoshis,
+      };
+
+      // Parse BRC-29 derivation from customInstructions.
+      let ci: any = {};
+      try {
+        ci = typeof pick.customInstructions === 'string'
+          ? JSON.parse(pick.customInstructions)
+          : (pick.customInstructions ?? {});
+      } catch {
+        /* keep empty */
+      }
+      const prefix = ci.derivationPrefix ?? '';
+      const suffix = ci.derivationSuffix ?? '';
+      const keyID = prefix && suffix ? `${prefix} ${suffix}` : suffix || prefix || '';
+      const counterparty = ci.payee ?? 'self';
+
+      // eslint-disable-next-line no-console
+      console.log('[stas-transfer] payment derivation:', { keyID, counterparty });
+
+      paymentDerivation = {
+        protocolID: BRC29_PROTOCOL_ID,
+        keyID,
+        counterparty,
+      };
+
+      const pkRes = await this.wallet.getPublicKey(
+        {
+          protocolID: paymentDerivation.protocolID,
+          keyID: paymentDerivation.keyID,
+          counterparty: paymentDerivation.counterparty,
+        } as any,
+        ORIGINATOR
+      );
+      paymentPubKey = bsv.PublicKey.fromString(pkRes.publicKey);
     } catch (err) {
-      return { ok: false, reason: `invalid recipient: ${errMsg(err)}` };
+      return { ok: false, reason: `payment UTXO selection: ${errMsg(err)}` };
     }
 
-    // 3. Build the new STAS locking script — engine + tokenId unchanged, only
-    //    the owner-field hash160 swaps. `updateStasScript` and `getVersion`
-    //    operate on the HEX STRING form of the script (they regex on it),
-    //    NOT a parsed Script object. Pass scriptHex directly.
-    let newStasScriptHex: string;
-    let stasVersion: number;
-    try {
-      newStasScriptHex = updateStasScript(recipientPkhHex, source.scriptHex);
-      stasVersion = getVersion(source.scriptHex);
-    } catch (err) {
-      return { ok: false, reason: `script build: ${errMsg(err)}` };
-    }
+    // 3. STAS UTXO in stas-js's expected shape.
+    const stasUtxo = {
+      txid: source.txid,
+      vout: source.vout,
+      scriptPubKey: source.scriptHex,
+      satoshis: source.satoshis,
+    };
 
-    // 4. Build inputBEEF for the source STAS tx via buildChainedAtomicBeef,
-    //    which now falls back to WoC when wallet Services doesn't return a
-    //    rawTx or merkle path. Same helper the receive side uses; here we
-    //    take its `.beef` (non-atomic) output for createAction's inputBEEF.
-    let inputBEEF: number[];
-    try {
-      const built = await buildChainedAtomicBeef({
-        wallet: this.wallet,
-        txid: source.txid,
-      });
-      inputBEEF = built.beef;
-    } catch (err) {
-      return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
-    }
+    // 4. Signing callbacks.
+    const ownerSignatureCallback = async (
+      tx: any,
+      inputIndex: number,
+      script: any,
+      satoshisBN: any
+    ): Promise<string> => {
+      const preimage = bsv.Transaction.sighash.sighashPreimage(
+        tx, SIGHASH, inputIndex, script, satoshisBN
+      );
+      const digest = bsv.crypto.Hash.sha256sha256(preimage);
+      const sigRes = await this.wallet.createSignature(
+        {
+          protocolID: STAS_PROTOCOL_ID as any,
+          keyID: source.brc42KeyId,
+          counterparty: STAS_COUNTERPARTY as any,
+          hashToDirectlySign: Array.from(digest as Buffer) as number[],
+        } as any,
+        ORIGINATOR
+      );
+      const derHex = toHex(sigRes.signature);
+      const sighashHex = SIGHASH.toString(16).padStart(2, '0');
+      return derHex + sighashHex;
+    };
 
-    // 4b. Flip `outputs.spendable` to true. wallet-toolbox marks STAS outputs
-    //     spendable=false on insertion because the custom locking script
-    //     doesn't match a template it knows how to unlock. We handle the
-    //     unlock externally, so the flag is a false negative we need to
-    //     override before createAction's basket-spend gate.
+    const paymentSignatureCallback = async (
+      tx: any,
+      inputIndex: number,
+      script: any,
+      satoshisBN: any
+    ): Promise<string> => {
+      const preimage = bsv.Transaction.sighash.sighashPreimage(
+        tx, SIGHASH, inputIndex, script, satoshisBN
+      );
+      const digest = bsv.crypto.Hash.sha256sha256(preimage);
+      const sigRes = await this.wallet.createSignature(
+        {
+          protocolID: paymentDerivation.protocolID,
+          keyID: paymentDerivation.keyID,
+          counterparty: paymentDerivation.counterparty,
+          hashToDirectlySign: Array.from(digest as Buffer) as number[],
+        } as any,
+        ORIGINATOR
+      );
+      const derHex = toHex(sigRes.signature);
+      const sighashHex = SIGHASH.toString(16).padStart(2, '0');
+      return derHex + sighashHex;
+    };
+
+    // 5. Flip STAS spendable flag (cosmetic — createAction isn't involved
+    //    here, but other wallet paths may check it).
     try {
       const outputId: number | null = await stasQuery(
         this.identityKey,
@@ -145,232 +235,38 @@ export class StasTransferService {
         [source.txid, source.vout]
       );
       if (outputId) {
-        await stasQuery(
-          this.identityKey,
-          this.chain,
-          'setOutputSpendable',
-          [outputId, true]
-        );
+        await stasQuery(this.identityKey, this.chain, 'setOutputSpendable', [outputId, true]);
       }
-    } catch (err) {
-      // Best effort — proceed; createAction will surface a clearer error if
-      // the spendable flag is still wrong.
-      // eslint-disable-next-line no-console
-      console.warn(`[StasTransferService] could not flip spendable flag: ${errMsg(err)}`);
-    }
-
-    // 5. createAction. Wallet auto-funds (adds BSV inputs from default basket
-    //    + change). Our STAS input is signable: we provide unlockingScriptLength
-    //    only, then sign externally via signAction.
-    let createRes: any;
-    try {
-      createRes = await this.wallet.createAction(
-        {
-          inputBEEF,
-          inputs: [
-            {
-              outpoint: `${source.txid}.${source.vout}`,
-              // Classic STAS unlocking scripts run 3–4 KB: the engine
-              // push-data segments + the full SIGHASH preimage hex
-              // (~700 bytes) + DER signature (~73) + pubkey (33). 4500
-              // is generous; the wallet uses this to size the fee.
-              unlockingScriptLength: 4500,
-              inputDescription: 'STAS being transferred',
-            },
-          ],
-          outputs: [
-            {
-              lockingScript: newStasScriptHex,
-              satoshis: source.satoshis,
-              outputDescription: 'STAS to recipient',
-            },
-          ],
-          description: 'STAS transfer',
-          options: {
-            acceptDelayedBroadcast: false,
-            // CRITICAL: the STAS engine assumes the new STAS UTXO is at vout 0.
-            // Without this flag, wallet-toolbox shuffles output order for
-            // privacy and places fragmentation outputs ahead of ours. The
-            // engine then reads vout 0 (a wallet P2PKH) instead of our STAS
-            // and rejects with "top stack must be truthy after eval".
-            randomizeOutputs: false,
-          },
-        } as any,
-        ORIGINATOR
-      );
-    } catch (err) {
-      return { ok: false, reason: `createAction: ${errMsg(err)}` };
-    }
-
-    const signable = createRes?.signableTransaction;
-    if (!signable || !signable.tx) {
-      return { ok: false, reason: 'createAction did not return signableTransaction' };
-    }
-
-    // 5. Parse the wallet-built tx. signableTransaction.tx is an AtomicBEEF
-    //    (not a plain rawTx) — pull out the atomic-txid's transaction bytes
-    //    and hand THOSE to bsv-js so stas-js can build the partial unlocking.
-    //
-    //    bsv-js's parsed tx does NOT populate `inputs[i].output` (the source
-    //    output info) — that data isn't in the tx bytes themselves. We need
-    //    to set it manually for input 0 (our STAS input) because
-    //    partialSTASUnlockingScript reads `tx.inputs[0].output.script` and
-    //    `.satoshisBN` to build the sighash preimage.
-    let tx: any;
-    try {
-      const beef = Beef.fromBinary(signable.tx);
-      const atomicTxid = (beef as any).atomicTxid as string | undefined;
-      if (!atomicTxid) {
-        return { ok: false, reason: 'signable BEEF has no atomic txid' };
-      }
-      const btx = beef.findTxid(atomicTxid);
-      if (!btx?.tx) {
-        return { ok: false, reason: `signable BEEF missing atomic tx ${atomicTxid}` };
-      }
-      const rawTxBytes = btx.tx.toBinary();
-      const txHex = Buffer.from(rawTxBytes).toString('hex');
-      tx = new bsv.Transaction(txHex);
-
-      // Attach the source output info to input 0 so partialSTASUnlockingScript
-      // can read script + satoshis for the sighash preimage.
-      tx.inputs[0].output = new bsv.Transaction.Output({
-        script: bsv.Script.fromHex(source.scriptHex),
-        satoshis: source.satoshis,
-      });
-      // partialSTASUnlockingScript also checks `tx.inputs[0].script` is set
-      // (non-null Script). bsv-js's parse leaves it as an empty Script which
-      // is truthy, so no extra action needed.
-    } catch (err) {
-      return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
-    }
-
-    // ----- diagnostics — log the wallet-built tx structure -----
-    // STAS-engine evaluation rejects with empty-stack-at-end when the tx
-    // layout doesn't match what partialSTASUnlockingScript described. These
-    // logs let us see what the wallet actually built vs what we're asserting.
-    /* eslint-disable no-console */
-    try {
-      console.log('[stas-transfer] tx inputs:', tx.inputs.length);
-      for (let i = 0; i < tx.inputs.length; i++) {
-        const inp = tx.inputs[i];
-        const prevTxidHex =
-          typeof inp.prevTxId === 'string'
-            ? inp.prevTxId
-            : Buffer.from(inp.prevTxId).toString('hex');
-        console.log(`  in ${i}: ${prevTxidHex}.${inp.outputIndex}`);
-      }
-      console.log('[stas-transfer] tx outputs:', tx.outputs.length);
-      for (let v = 0; v < tx.outputs.length; v++) {
-        const out = tx.outputs[v];
-        const sHex = out.script.toHex();
-        console.log(
-          `  out ${v}: ${out.satoshis} sats, len=${sHex.length / 2}, head=${sHex.substring(0, 24)}`
-        );
-      }
-      console.log('[stas-transfer] source STAS sats=', source.satoshis, 'recipientPkh=', recipientPkhHex);
     } catch {
-      /* never block flow on logging */
+      /* best effort */
     }
-    /* eslint-enable no-console */
 
-    // 6. Identify the wallet-added change output. Our STAS is vout 0; wallet
-    //    typically appends change at vout 1+. Pick the first standard P2PKH.
-    let paymentSegment: { satoshis: number; publicKey: string } | null = null;
-    for (let v = 1; v < tx.outputs.length; v++) {
-      const sHex = tx.outputs[v].script.toHex();
-      if (sHex.startsWith('76a914') && sHex.endsWith('88ac') && sHex.length === 50) {
-        paymentSegment = {
-          satoshis: tx.outputs[v].satoshis,
-          publicKey: sHex.substring(6, 46),
-        };
-        break;
-      }
-    }
-    /* eslint-disable no-console */
-    console.log('[stas-transfer] paymentSegment:', paymentSegment, 'isZeroFee:', paymentSegment === null);
-    /* eslint-enable no-console */
-
-    // 7. partialSTASUnlockingScript populates tx.inputs[0].script with the
-    //    engine push-data prefix.
+    // 6. stas-js builds tx + drives callbacks. Returns serialized hex.
+    let signedTxHex: string;
     try {
-      partialSTASUnlockingScript(
-        tx,
-        [
-          { satoshis: source.satoshis, publicKey: recipientPkhHex },
-          null,
-          paymentSegment,
-        ],
-        stasVersion,
-        paymentSegment === null
+      const { transferWithCallback } = stasJs;
+      signedTxHex = await transferWithCallback(
+        ownerPubKey,
+        stasUtxo,
+        recipientAddress,
+        paymentUtxo,
+        paymentPubKey,
+        ownerSignatureCallback,
+        paymentSignatureCallback
       );
     } catch (err) {
-      return { ok: false, reason: `partial unlocking: ${errMsg(err)}` };
+      return { ok: false, reason: `transferWithCallback: ${errMsg(err)}` };
     }
 
-    // 8. Sighash for input 0 over the SOURCE locking script (not the new one).
-    let sigHex: string;
+    // 7. Broadcast via WoC.
+    let txid: string;
     try {
-      const sourceLocking = bsv.Script.fromHex(source.scriptHex);
-      const satsBN = new bsv.crypto.BN(source.satoshis);
-      const preimage = bsv.Transaction.sighash.sighashPreimage(
-        tx,
-        SIGHASH,
-        0,
-        sourceLocking,
-        satsBN
-      );
-      const digestBuf = bsv.crypto.Hash.sha256sha256(preimage);
-      const digestBytes = Array.from(digestBuf as Buffer) as number[];
-
-      // Use `hashToDirectlySign` to pass the already-double-SHA256'd digest
-      // straight to ECDSA. `data` would make the wallet add another sha256
-      // internally (signing sha256(sha256(sha256(preimage)))), which CHECKSIG
-      // rejects because the engine verifies against sha256(sha256(preimage)).
-      const sigRes = await this.wallet.createSignature(
-        {
-          protocolID: STAS_PROTOCOL_ID as any,
-          keyID: source.brc42KeyId,
-          counterparty: STAS_COUNTERPARTY as any,
-          hashToDirectlySign: digestBytes,
-        } as any,
-        ORIGINATOR
-      );
-
-      const derHex = toHex(sigRes.signature);
-      const sighashHex = SIGHASH.toString(16).padStart(2, '0');
-      sigHex = derHex + sighashHex;
+      txid = await broadcastViaWoc(signedTxHex);
     } catch (err) {
-      return { ok: false, reason: `sighash / sign: ${errMsg(err)}` };
+      return { ok: false, reason: `broadcast: ${errMsg(err)}` };
     }
 
-    // 9. Final unlocking script = partial + sig + pubkey.
-    let unlockingScriptHex: string;
-    try {
-      const partialASM = tx.inputs[0].script.toASM();
-      const finalASM = `${partialASM} ${sigHex} ${ownerPubKey.toString('hex')}`;
-      unlockingScriptHex = bsv.Script.fromASM(finalASM).toHex();
-    } catch (err) {
-      return { ok: false, reason: `unlocking assembly: ${errMsg(err)}` };
-    }
-
-    // 10. signAction. Wallet signs its own funding inputs + uses our STAS
-    //     unlocking, then broadcasts.
-    let signResp: any;
-    try {
-      signResp = await this.wallet.signAction(
-        {
-          reference: signable.reference,
-          spends: {
-            0: { unlockingScript: unlockingScriptHex },
-          },
-        } as any,
-        ORIGINATOR
-      );
-    } catch (err) {
-      return { ok: false, reason: `signAction: ${errMsg(err)}` };
-    }
-
-    return { ok: true, txid: signResp?.txid };
+    return { ok: true, txid };
   }
 }
 
@@ -381,4 +277,15 @@ function errMsg(err: unknown): string {
 function toHex(bytes: number[] | Uint8Array): string {
   const arr = Array.isArray(bytes) ? bytes : Array.from(bytes);
   return arr.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function broadcastViaWoc(txHex: string): Promise<string> {
+  const res = await fetch('https://api.whatsonchain.com/v1/bsv/main/tx/raw', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txhex: txHex }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`WoC ${res.status}: ${text.slice(0, 200)}`);
+  return text.trim().replace(/^"|"$/g, '');
 }
