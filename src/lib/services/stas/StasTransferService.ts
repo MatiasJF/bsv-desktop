@@ -198,6 +198,12 @@ export class StasTransferService {
     // 5. Parse the wallet-built tx. signableTransaction.tx is an AtomicBEEF
     //    (not a plain rawTx) — pull out the atomic-txid's transaction bytes
     //    and hand THOSE to bsv-js so stas-js can build the partial unlocking.
+    //
+    //    bsv-js's parsed tx does NOT populate `inputs[i].output` (the source
+    //    output info) — that data isn't in the tx bytes themselves. We need
+    //    to set it manually for input 0 (our STAS input) because
+    //    partialSTASUnlockingScript reads `tx.inputs[0].output.script` and
+    //    `.satoshisBN` to build the sighash preimage.
     let tx: any;
     try {
       const beef = Beef.fromBinary(signable.tx);
@@ -212,6 +218,16 @@ export class StasTransferService {
       const rawTxBytes = btx.tx.toBinary();
       const txHex = Buffer.from(rawTxBytes).toString('hex');
       tx = new bsv.Transaction(txHex);
+
+      // Attach the source output info to input 0 so partialSTASUnlockingScript
+      // can read script + satoshis for the sighash preimage.
+      tx.inputs[0].output = new bsv.Transaction.Output({
+        script: bsv.Script.fromHex(source.scriptHex),
+        satoshis: source.satoshis,
+      });
+      // partialSTASUnlockingScript also checks `tx.inputs[0].script` is set
+      // (non-null Script). bsv-js's parse leaves it as an empty Script which
+      // is truthy, so no extra action needed.
     } catch (err) {
       return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
     }
