@@ -282,13 +282,17 @@ export class StasTransferService {
       const digestBuf = bsv.crypto.Hash.sha256sha256(preimage);
       const digestBytes = Array.from(digestBuf as Buffer) as number[];
 
+      // Use `hashToDirectlySign` to pass the already-double-SHA256'd digest
+      // straight to ECDSA. `data` would make the wallet add another sha256
+      // internally (signing sha256(sha256(sha256(preimage)))), which CHECKSIG
+      // rejects because the engine verifies against sha256(sha256(preimage)).
       const sigRes = await this.wallet.createSignature(
         {
           protocolID: STAS_PROTOCOL_ID as any,
           keyID: source.brc42KeyId,
           counterparty: STAS_COUNTERPARTY as any,
-          data: digestBytes,
-        },
+          hashToDirectlySign: digestBytes,
+        } as any,
         ORIGINATOR
       );
 
