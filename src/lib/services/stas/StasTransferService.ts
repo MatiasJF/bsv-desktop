@@ -13,6 +13,7 @@
  */
 
 import type { WalletInterface } from '@bsv/sdk';
+import { Beef } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 
@@ -162,10 +163,23 @@ export class StasTransferService {
       return { ok: false, reason: 'createAction did not return signableTransaction' };
     }
 
-    // 5. Parse the wallet-built tx. signableTransaction.tx is plain rawTx bytes.
+    // 5. Parse the wallet-built tx. signableTransaction.tx is an AtomicBEEF
+    //    (not a plain rawTx) — pull out the atomic-txid's transaction bytes
+    //    and hand THOSE to bsv-js so stas-js can build the partial unlocking.
     let tx: any;
     try {
-      tx = new bsv.Transaction(Buffer.from(signable.tx).toString('hex'));
+      const beef = Beef.fromBinary(signable.tx);
+      const atomicTxid = (beef as any).atomicTxid as string | undefined;
+      if (!atomicTxid) {
+        return { ok: false, reason: 'signable BEEF has no atomic txid' };
+      }
+      const btx = beef.findTxid(atomicTxid);
+      if (!btx?.tx) {
+        return { ok: false, reason: `signable BEEF missing atomic tx ${atomicTxid}` };
+      }
+      const rawTxBytes = btx.tx.toBinary();
+      const txHex = Buffer.from(rawTxBytes).toString('hex');
+      tx = new bsv.Transaction(txHex);
     } catch (err) {
       return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
     }
