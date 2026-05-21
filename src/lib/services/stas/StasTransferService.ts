@@ -14,7 +14,7 @@
 
 import type { WalletInterface } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
-import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
+import { STAS_BASKET } from '../../constants/baskets';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -111,18 +111,32 @@ export class StasTransferService {
       return { ok: false, reason: `script build: ${errMsg(err)}` };
     }
 
-    // 4. Build inputBEEF for the STAS source tx — wallet-toolbox's createAction
-    //    requires proof data for any input outpoint it considers "possibly
-    //    known", even when the outpoint is already in one of its baskets.
-    //    Re-uses Task 4c's buildChainedAtomicBeef helper which walks back
-    //    through the input chain to a confirmed bump (so a mempool STAS works
-    //    too).
+    // 4. Get inputBEEF from the wallet's own storage. internalizeAction stored
+    //    the source tx + its merkle proof when this STAS was first received;
+    //    `listOutputs({ include: 'entire transactions' })` returns a BEEF
+    //    containing every source tx the wallet has cached for the basket.
+    //    That gives createAction the proof data it needs without us walking
+    //    back through inputs ourselves (which would otherwise hit WoC for
+    //    ancestors that may no longer be retrievable).
     let inputBEEF: number[];
     try {
-      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: source.txid });
-      inputBEEF = built.beef;
+      const lor: any = await this.wallet.listOutputs(
+        {
+          basket: STAS_BASKET,
+          include: 'entire transactions',
+          limit: 500,
+        } as any,
+        ORIGINATOR
+      );
+      if (!Array.isArray(lor?.BEEF) || lor.BEEF.length === 0) {
+        return {
+          ok: false,
+          reason: 'wallet.listOutputs returned no BEEF for stas-tokens basket',
+        };
+      }
+      inputBEEF = lor.BEEF;
     } catch (err) {
-      return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
+      return { ok: false, reason: `listOutputs for BEEF: ${errMsg(err)}` };
     }
 
     // 5. createAction. Wallet auto-funds (adds BSV inputs from default basket
