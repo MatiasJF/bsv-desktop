@@ -344,7 +344,9 @@ export default function StasDebugPanel() {
                                     ok: true,
                                     message: `Broadcast ✓ txid=${result.txid}`,
                                   })
-                                  setSendOpenForOutput(null)
+                                  // Keep the form open so the user can SEE the
+                                  // txid. Closing it would unmount the result
+                                  // display (it lives inside the inline form).
                                   loadStas()
                                 } else {
                                   setSendResult({
@@ -352,6 +354,10 @@ export default function StasDebugPanel() {
                                     message: result.reason ?? 'transfer failed',
                                   })
                                 }
+                                // Surface the result to the console too so we
+                                // never lose track of a txid when the UI hides it.
+                                // eslint-disable-next-line no-console
+                                console.log('[stas-transfer] result:', result)
                               } catch (e) {
                                 setSendResult({
                                   ok: false,
