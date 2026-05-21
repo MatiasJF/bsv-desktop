@@ -20,10 +20,14 @@ async function loadStasDeps(): Promise<{
   stasInternals: any;
   SIGHASH: number;
 }> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const bsv: any = require('bsv');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const stasInternals: any = require('stas-js/lib/stas.js');
+  // Dynamic ESM imports — `require` doesn't exist in the browser/Vite world.
+  // Vite's optimizeDeps pre-bundles these CJS packages so we can import them.
+  // CJS modules expose their `module.exports` as the default export under ESM
+  // interop, so unwrap `.default` if present.
+  const bsvMod: any = await import('bsv');
+  const bsv = bsvMod.default ?? bsvMod;
+  const stasInternalsMod: any = await import('stas-js/lib/stas.js');
+  const stasInternals = stasInternalsMod.default ?? stasInternalsMod;
   return { bsv, stasInternals, SIGHASH: stasInternals.sighash };
 }
 
