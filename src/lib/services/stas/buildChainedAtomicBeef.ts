@@ -35,6 +35,11 @@ export interface BuildChainedBeefArgs {
 export interface BuildChainedBeefResult {
   /** AtomicBEEF bytes ready for `internalizeAction(tx: ...)`. */
   atomicBeef: number[];
+  /**
+   * Plain BEEF bytes (no AtomicBEEF prefix) ready for `createAction(inputBEEF: ...)`.
+   * Same payload as `atomicBeef` minus the BRC-95 prefix + atomic txid.
+   */
+  beef: number[];
   /** Total txs included in the BEEF (target + ancestors). */
   txCount: number;
   /**
@@ -127,6 +132,7 @@ export async function buildChainedAtomicBeef(
 
   return {
     atomicBeef: beef.toBinaryAtomic(args.txid),
+    beef: beef.toBinary(),
     txCount: seen.size,
     depth: maxDepthSeen,
   };

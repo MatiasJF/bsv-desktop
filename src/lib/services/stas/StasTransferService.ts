@@ -14,6 +14,7 @@
 
 import type { WalletInterface } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
+import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -110,13 +111,28 @@ export class StasTransferService {
       return { ok: false, reason: `script build: ${errMsg(err)}` };
     }
 
-    // 4. createAction. Wallet auto-funds (adds BSV inputs from default basket
+    // 4. Build inputBEEF for the STAS source tx — wallet-toolbox's createAction
+    //    requires proof data for any input outpoint it considers "possibly
+    //    known", even when the outpoint is already in one of its baskets.
+    //    Re-uses Task 4c's buildChainedAtomicBeef helper which walks back
+    //    through the input chain to a confirmed bump (so a mempool STAS works
+    //    too).
+    let inputBEEF: number[];
+    try {
+      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: source.txid });
+      inputBEEF = built.beef;
+    } catch (err) {
+      return { ok: false, reason: `inputBEEF assembly: ${errMsg(err)}` };
+    }
+
+    // 5. createAction. Wallet auto-funds (adds BSV inputs from default basket
     //    + change). Our STAS input is signable: we provide unlockingScriptLength
     //    only, then sign externally via signAction.
     let createRes: any;
     try {
       createRes = await this.wallet.createAction(
         {
+          inputBEEF,
           inputs: [
             {
               outpoint: `${source.txid}.${source.vout}`,
