@@ -137,6 +137,7 @@ function parseOrigin(headers: Record<string, string>): string | null {
 
 // Module-level wallet ref — survives React effect cleanup/re-runs
 let _currentWallet: WalletInterface | null = null;
+let _currentStasDiscovery: any = null;
 let _listenerRegistered = false;
 
 /** Test-only: read current wallet ref */
@@ -144,13 +145,31 @@ export function _test_getCurrentWallet(): WalletInterface | null { return _curre
 /** Test-only: read listener state */
 export function _test_isListenerRegistered(): boolean { return _listenerRegistered; }
 /** Test-only: reset module state */
-export function _test_reset(): void { _currentWallet = null; _listenerRegistered = false; }
+export function _test_reset(): void {
+  _currentWallet = null;
+  _currentStasDiscovery = null;
+  _listenerRegistered = false;
+}
+
+/**
+ * Inject (or clear) the STAS discovery service used by the
+ * `/stas/register-by-txid` HTTP route. Called from WalletContext as soon
+ * as the wallet's StasServices snapshot becomes available — kept separate
+ * from `onWalletReady` so the prop interface stays single-arg.
+ */
+export function setStasDiscoveryForHttpRoute(
+  discovery: { registerByTxid: (txid: string) => Promise<any> } | null
+): void {
+  _currentStasDiscovery = discovery;
+}
 
 /**
  * Update the wallet instance used by the HTTP listener.
  * First call also registers the IPC listener (once, never removed).
  */
-export const onWalletReady = async (wallet: WalletInterface): Promise<(() => void) | undefined> => {
+export const onWalletReady = async (
+  wallet: WalletInterface
+): Promise<(() => void) | undefined> => {
   _currentWallet = wallet;
   console.log('[onWalletReady] wallet ref updated, listenerRegistered:', _listenerRegistered);
 
@@ -852,6 +871,45 @@ export const onWalletReady = async (wallet: WalletInterface): Promise<(() => voi
               body: JSON.stringify({
                 message: error instanceof Error ? error.message : String(error)
               }),
+            };
+          }
+          break;
+        }
+
+        // STAS auto-register (non-BRC-100, BSV Desktop extension).
+        // Faucets / senders POST { txid } after broadcast; the wallet runs
+        // discovery.registerByTxid which fetches the rawTx + merkle path,
+        // parses, matches owner field to a derived key, and internalizes.
+        case '/stas/register-by-txid': {
+          try {
+            if (!_currentStasDiscovery) {
+              response = {
+                request_id: req.request_id,
+                status: 503,
+                body: JSON.stringify({ error: 'STAS discovery service not ready' }),
+              };
+              break;
+            }
+            const { txid } = (req.body ? JSON.parse(req.body) : {}) as { txid?: string };
+            if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/i.test(txid)) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({ error: 'txid (64-hex) is required' }),
+              };
+              break;
+            }
+            const result = await _currentStasDiscovery.registerByTxid(txid);
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify(result),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
             };
           }
           break;
