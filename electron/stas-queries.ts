@@ -149,6 +149,109 @@ export class StasQueries {
     };
   }
 
+  /**
+   * Enumerate every basket the wallet knows about, with output counts.
+   *
+   * BRC-100's `listOutputs` requires a basket name upfront — there's no
+   * "give me every basket" method on the wallet surface. We query the
+   * toolbox's `output_baskets` table directly and join `outputs` for
+   * counts/totals.
+   */
+  async listAllBaskets(): Promise<
+    Array<{
+      basketId: number;
+      name: string;
+      numberOfDesiredUTXOs: number | null;
+      minimumDesiredUTXOValue: number | null;
+      outputCount: number;
+      spendableCount: number;
+      totalSatoshis: number;
+    }>
+  > {
+    const baskets = await this.knex('output_baskets')
+      .where({ isDeleted: 0 })
+      .select(
+        'basketId',
+        'name',
+        'numberOfDesiredUTXOs',
+        'minimumDesiredUTXOValue'
+      );
+    if (baskets.length === 0) return [];
+
+    const counts = await this.knex('outputs')
+      .whereIn(
+        'basketId',
+        baskets.map((b: any) => b.basketId)
+      )
+      .groupBy('basketId')
+      .select(
+        'basketId',
+        this.knex.raw('COUNT(*) as outputCount'),
+        this.knex.raw('SUM(CASE WHEN spendable = 1 THEN 1 ELSE 0 END) as spendableCount'),
+        this.knex.raw('SUM(satoshis) as totalSatoshis')
+      );
+
+    const byId = new Map<number, any>();
+    for (const c of counts) byId.set(c.basketId, c);
+
+    return baskets.map((b: any) => ({
+      basketId: b.basketId,
+      name: b.name,
+      numberOfDesiredUTXOs: b.numberOfDesiredUTXOs ?? null,
+      minimumDesiredUTXOValue: b.minimumDesiredUTXOValue ?? null,
+      outputCount: byId.get(b.basketId)?.outputCount ?? 0,
+      spendableCount: byId.get(b.basketId)?.spendableCount ?? 0,
+      totalSatoshis: byId.get(b.basketId)?.totalSatoshis ?? 0,
+    }));
+  }
+
+  /**
+   * Outputs inside a specific basket. Returns satellite-friendly fields:
+   * outpoint, satoshis, lockingScript (hex), spendable, customInstructions,
+   * tags (semicolon-joined if present on the row).
+   */
+  async listBasketOutputs(basketName: string): Promise<any[]> {
+    const basket = await this.knex('output_baskets')
+      .where({ name: basketName, isDeleted: 0 })
+      .first('basketId');
+    if (!basket) return [];
+    const rows = await this.knex('outputs')
+      .where({ basketId: basket.basketId })
+      .select(
+        'outputId',
+        'txid',
+        'vout',
+        'satoshis',
+        'spendable',
+        'lockingScript',
+        'customInstructions',
+        'type',
+        'created_at'
+      )
+      .orderBy('created_at', 'desc')
+      .limit(500);
+
+    return rows.map((r: any) => ({
+      outputId: r.outputId,
+      outpoint: `${r.txid}.${r.vout}`,
+      txid: r.txid,
+      vout: r.vout,
+      satoshis: r.satoshis,
+      spendable: !!r.spendable,
+      type: r.type,
+      customInstructions: r.customInstructions ?? null,
+      lockingScript:
+        r.lockingScript == null
+          ? null
+          : Buffer.isBuffer(r.lockingScript)
+            ? r.lockingScript.toString('hex')
+            : typeof r.lockingScript === 'string'
+              ? r.lockingScript
+              : Buffer.from(r.lockingScript).toString('hex'),
+      createdAt: r.created_at,
+    }));
+  }
+
   /** Idempotency probe: has an outpoint already been registered as STAS? */
   async findStasOutputByOutpoint(
     txid: string,

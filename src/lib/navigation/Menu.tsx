@@ -14,6 +14,7 @@ import {
 } from '@mui/icons-material'
 import SyncAltIcon from '@mui/icons-material/SyncAlt';
 import TokenIcon from '@mui/icons-material/Token';
+import InventoryIcon from '@mui/icons-material/Inventory';
 import VerifiedUserIcon from '@mui/icons-material/VerifiedUser'
 import GridViewIcon from '@mui/icons-material/GridView'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
@@ -759,6 +760,26 @@ export default function Menu({ menuOpen, setMenuOpen, menuRef }: MenuProps) {
                   fontWeight={history.location.pathname === '/dashboard/stas' ? 600 : 400}
                 >
                   STAS (dev)
+                </Typography>
+              }
+            />
+          </ListItemButton>
+
+          <ListItemButton
+            onClick={() => navigation.push('/dashboard/baskets')}
+            selected={history.location.pathname === '/dashboard/baskets'}
+            sx={menuItemStyle(history.location.pathname === '/dashboard/baskets')}
+          >
+            <ListItemIcon sx={{ minWidth: 40, color: history.location.pathname === '/dashboard/baskets' ? 'primary.main' : 'inherit' }}>
+              <InventoryIcon />
+            </ListItemIcon>
+            <ListItemText
+              primary={
+                <Typography
+                  variant="body1"
+                  fontWeight={history.location.pathname === '/dashboard/baskets' ? 600 : 400}
+                >
+                  Baskets
                 </Typography>
               }
             />

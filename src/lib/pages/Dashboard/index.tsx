@@ -31,6 +31,7 @@ import CounterpartyAccess from './CounterpartyAccess'; // Assuming index.jsx or 
 import CertificateAccess from './CertificateAccess'; // Assuming index.jsx or similar
 import { WalletContext } from '../../WalletContext';
 import StasDebugPanel from './StasDebugPanel';
+import BasketsPage from './BasketsPage';
 // @ts-expect-error - Type issues with makeStyles
 const useStyles = makeStyles(style, {
   name: 'Dashboard'
@@ -116,6 +117,10 @@ export default function Dashboard() {
           <Route
             path='/dashboard/stas'
             component={StasDebugPanel}
+          />
+          <Route
+            path='/dashboard/baskets'
+            component={BasketsPage}
           />
           {/* Existing Redirects */}
           <Redirect from='/dashboard/counterparty/self' to={`/dashboard/counterparty/${myIdentityKey}`} />
