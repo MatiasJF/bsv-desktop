@@ -215,26 +215,29 @@ export class StasQueries {
       .where({ name: basketName, isDeleted: 0 })
       .first('basketId');
     if (!basket) return [];
-    const rows = await this.knex('outputs')
-      .where({ basketId: basket.basketId })
+    // wallet-toolbox stores `txid` on `transactions`, not `outputs` — outputs
+    // carries `transactionId` as a foreign key. Join to surface the real txid.
+    const rows = await this.knex('outputs as o')
+      .join('transactions as t', 't.transactionId', 'o.transactionId')
+      .where('o.basketId', basket.basketId)
       .select(
-        'outputId',
-        'txid',
-        'vout',
-        'satoshis',
-        'spendable',
-        'lockingScript',
-        'customInstructions',
-        'type',
-        'created_at'
+        'o.outputId as outputId',
+        't.txid as txid',
+        'o.vout as vout',
+        'o.satoshis as satoshis',
+        'o.spendable as spendable',
+        'o.lockingScript as lockingScript',
+        'o.customInstructions as customInstructions',
+        'o.type as type',
+        'o.created_at as createdAt'
       )
-      .orderBy('created_at', 'desc')
+      .orderBy('o.created_at', 'desc')
       .limit(500);
 
     return rows.map((r: any) => ({
       outputId: r.outputId,
-      outpoint: `${r.txid}.${r.vout}`,
-      txid: r.txid,
+      outpoint: r.txid != null ? `${r.txid}.${r.vout}` : `?.${r.vout}`,
+      txid: r.txid ?? null,
       vout: r.vout,
       satoshis: r.satoshis,
       spendable: !!r.spendable,
@@ -248,7 +251,7 @@ export class StasQueries {
             : typeof r.lockingScript === 'string'
               ? r.lockingScript
               : Buffer.from(r.lockingScript).toString('hex'),
-      createdAt: r.created_at,
+      createdAt: r.createdAt,
     }));
   }
 

@@ -47,7 +47,7 @@ interface BasketRow {
 interface OutputRow {
   outputId: number
   outpoint: string
-  txid: string
+  txid: string | null
   vout: number
   satoshis: number
   spendable: boolean
@@ -273,14 +273,18 @@ export default function BasketsPage() {
                     {outputs.map((o) => (
                       <TableRow key={o.outputId} hover>
                         <TableCell sx={{ fontFamily: 'monospace', fontSize: 11 }}>
-                          <a
-                            href={`https://whatsonchain.com/tx/${o.txid}`}
-                            target='_blank'
-                            rel='noreferrer'
-                            style={{ color: 'inherit' }}
-                          >
-                            {o.txid.substring(0, 12)}…:{o.vout}
-                          </a>
+                          {o.txid ? (
+                            <a
+                              href={`https://whatsonchain.com/tx/${o.txid}`}
+                              target='_blank'
+                              rel='noreferrer'
+                              style={{ color: 'inherit' }}
+                            >
+                              {o.txid.substring(0, 12)}…:{o.vout}
+                            </a>
+                          ) : (
+                            <span style={{ color: '#888' }}>?:{o.vout}</span>
+                          )}
                         </TableCell>
                         <TableCell align='right' sx={{ fontFamily: 'monospace', fontSize: 11 }}>
                           {o.satoshis.toLocaleString()}
