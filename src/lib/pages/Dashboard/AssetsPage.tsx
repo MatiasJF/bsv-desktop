@@ -1,0 +1,587 @@
+/**
+ * AssetsPage — production-facing wallet view for STAS holdings.
+ *
+ * Replaces the dev panel's "My STAS" surface with a token-grouped layout:
+ * one card per (symbol, tokenId) bucket, expandable to show the underlying
+ * UTXOs, with explicit Send and Receive flows.
+ *
+ * Reads + writes through the same internal services the Apps API (Task 7a)
+ * exposes externally. The dev panel stays available at /dashboard/stas for
+ * scan / register / debug; this page is the user-facing surface.
+ */
+
+import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Collapse,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  IconButton,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@mui/material'
+import RefreshIcon from '@mui/icons-material/Refresh'
+import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import CheckIcon from '@mui/icons-material/Check'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import ExpandLessIcon from '@mui/icons-material/ExpandLess'
+import SendIcon from '@mui/icons-material/Send'
+import OpenInNewIcon from '@mui/icons-material/OpenInNew'
+import TokenIcon from '@mui/icons-material/Token'
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
+import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv'
+import { WalletContext } from '../../WalletContext'
+import { stasQuery } from '../../services/stas'
+
+interface OutputView {
+  outpoint: string
+  txid: string
+  vout: number
+  satoshis: number
+  spendable: boolean
+  tokenId: string
+  symbol: string | null
+  name: string | null
+  brc42KeyId: string | null
+  ownerFieldHash160: string
+  ownerAddress: string
+  scriptHex: string | null
+  frozen: boolean
+  confiscated: boolean
+}
+
+interface TokenGroup {
+  groupKey: string
+  symbol: string
+  name: string | null
+  tokenIds: Set<string>
+  outputCount: number
+  totalSatoshis: number
+  spendableSatoshis: number
+  outputs: OutputView[]
+}
+
+function groupByToken(outputs: OutputView[]): TokenGroup[] {
+  const byKey = new Map<string, TokenGroup>()
+  for (const o of outputs) {
+    // Prefer (symbol, tokenId) tuple — even if multiple tokens share a
+    // symbol they stay separate. Empty tokenId falls back to symbol-only.
+    const key = o.tokenId ? `${o.symbol ?? '?'}::${o.tokenId}` : o.symbol ?? 'unknown'
+    let g = byKey.get(key)
+    if (!g) {
+      g = {
+        groupKey: key,
+        symbol: o.symbol ?? 'unknown',
+        name: o.name,
+        tokenIds: new Set(),
+        outputCount: 0,
+        totalSatoshis: 0,
+        spendableSatoshis: 0,
+        outputs: [],
+      }
+      byKey.set(key, g)
+    }
+    g.outputCount += 1
+    g.totalSatoshis += o.satoshis
+    if (o.spendable) g.spendableSatoshis += o.satoshis
+    if (o.tokenId) g.tokenIds.add(o.tokenId)
+    if (!g.name && o.name) g.name = o.name
+    g.outputs.push(o)
+  }
+  return Array.from(byKey.values()).sort((a, b) => b.totalSatoshis - a.totalSatoshis)
+}
+
+function hash160ToAddress(hash160Hex: string): string {
+  return new (Address as any)(fromHex(hash160Hex)).Value as string
+}
+
+export default function AssetsPage() {
+  const { wallet, stas } = useContext(WalletContext)
+
+  const [holdings, setHoldings] = useState<OutputView[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const [receiveAddress, setReceiveAddress] = useState<string | null>(null)
+  const [receiveLabel, setReceiveLabel] = useState<string | null>(null)
+  const [generatingReceive, setGeneratingReceive] = useState(false)
+  const [receiveCopied, setReceiveCopied] = useState(false)
+  const [receiveError, setReceiveError] = useState<string | null>(null)
+
+  const [sendTarget, setSendTarget] = useState<OutputView | null>(null)
+  const [sendRecipient, setSendRecipient] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  const identityKey = stas?.keyDeriver?.identityKey
+  const chain = stas?.keyDeriver?.chain
+
+  const loadHoldings = useCallback(async () => {
+    if (!identityKey || !chain) return
+    setLoading(true)
+    setError(null)
+    try {
+      const [outputsRaw, tokensRaw]: [any[], any[]] = await Promise.all([
+        stasQuery(identityKey, chain, 'listStasOutputs', []),
+        stasQuery(identityKey, chain, 'listStasTokens', []),
+      ])
+      const tokenMap: Record<string, any> = {}
+      for (const t of tokensRaw ?? []) tokenMap[t.tokenId] = t
+      const mapped: OutputView[] = (outputsRaw ?? []).map((o: any) => ({
+        outpoint: `${o.txid}.${o.vout}`,
+        txid: o.txid,
+        vout: o.vout,
+        satoshis: o.outputSatoshis ?? o.tokenSatoshis ?? 0,
+        spendable: !!o.spendable,
+        tokenId: o.tokenId ?? '',
+        symbol: tokenMap[o.tokenId]?.symbol ?? o.symbol ?? null,
+        name: tokenMap[o.tokenId]?.name ?? null,
+        brc42KeyId: o.brc42KeyId ?? null,
+        ownerFieldHash160: o.ownerFieldHash160,
+        ownerAddress: hash160ToAddress(o.ownerFieldHash160),
+        scriptHex: o.lockingScript ?? null,
+        frozen: !!o.frozen,
+        confiscated: !!o.confiscated,
+      }))
+      setHoldings(mapped)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [identityKey, chain])
+
+  useEffect(() => {
+    if (stas?.keyDeriver) loadHoldings()
+  }, [stas?.keyDeriver, loadHoldings])
+
+  const groups = useMemo(() => groupByToken(holdings), [holdings])
+
+  const totalSats = useMemo(() => holdings.reduce((s, o) => s + o.satoshis, 0), [holdings])
+
+  const handleGenerateReceive = async () => {
+    if (!stas?.keyDeriver) return
+    setGeneratingReceive(true)
+    setReceiveError(null)
+    setReceiveCopied(false)
+    try {
+      const row = await stas.keyDeriver.createNextReceiveContext()
+      setReceiveAddress(hash160ToAddress(row.ownerFieldHash160))
+      setReceiveLabel(row.keyId)
+    } catch (e) {
+      setReceiveError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGeneratingReceive(false)
+    }
+  }
+
+  const handleCopyReceive = async () => {
+    if (!receiveAddress) return
+    try {
+      await navigator.clipboard.writeText(receiveAddress)
+      setReceiveCopied(true)
+      setTimeout(() => setReceiveCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const openSend = (o: OutputView) => {
+    setSendTarget(o)
+    setSendRecipient('')
+    setSendResult(null)
+  }
+
+  const handleSendConfirm = async () => {
+    if (!sendTarget || !stas?.transfer || !sendTarget.scriptHex || !sendTarget.brc42KeyId) return
+    setSending(true)
+    setSendResult(null)
+    try {
+      const result = await stas.transfer.transfer({
+        source: {
+          txid: sendTarget.txid,
+          vout: sendTarget.vout,
+          scriptHex: sendTarget.scriptHex,
+          satoshis: sendTarget.satoshis,
+          brc42KeyId: sendTarget.brc42KeyId,
+        },
+        recipientAddress: sendRecipient.trim(),
+      })
+      if (result.ok) {
+        setSendResult({ ok: true, message: `Broadcast ✓ txid=${result.txid}` })
+        loadHoldings()
+      } else {
+        setSendResult({ ok: false, message: result.reason ?? 'transfer failed' })
+      }
+    } catch (e) {
+      setSendResult({ ok: false, message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const toggleExpand = (key: string) => {
+    setExpanded((cur) => {
+      const next = new Set(cur)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  if (!wallet) return null
+
+  return (
+    <Box sx={{ m: 2 }}>
+      {/* Header */}
+      <Card sx={{ mb: 2 }}>
+        <CardContent>
+          <Stack
+            direction='row'
+            justifyContent='space-between'
+            alignItems='flex-start'
+            spacing={2}
+          >
+            <Box>
+              <Typography variant='h5' sx={{ fontWeight: 600 }}>
+                Assets
+              </Typography>
+              <Typography variant='body2' color='text.secondary' sx={{ mt: 0.5 }}>
+                STAS tokens held by this wallet — grouped by token, expandable to see each UTXO.
+              </Typography>
+              <Stack direction='row' spacing={2} sx={{ mt: 2 }}>
+                <Chip
+                  icon={<TokenIcon />}
+                  label={`${groups.length} ${groups.length === 1 ? 'token' : 'tokens'}`}
+                />
+                <Chip
+                  label={`${holdings.length} ${holdings.length === 1 ? 'output' : 'outputs'}`}
+                  variant='outlined'
+                />
+                <Chip
+                  label={`${totalSats.toLocaleString()} sats total`}
+                  variant='outlined'
+                  color='primary'
+                />
+              </Stack>
+            </Box>
+            <Button
+              size='small'
+              variant='outlined'
+              startIcon={loading ? <CircularProgress size={14} /> : <RefreshIcon />}
+              onClick={loadHoldings}
+              disabled={loading}
+            >
+              {loading ? 'Loading…' : 'Refresh'}
+            </Button>
+          </Stack>
+          {error && (
+            <Typography variant='caption' color='error' sx={{ display: 'block', mt: 1 }}>
+              {error}
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Receive address */}
+      <Card sx={{ mb: 2 }}>
+        <CardContent>
+          <Stack
+            direction='row'
+            justifyContent='space-between'
+            alignItems='center'
+            spacing={2}
+          >
+            <Box>
+              <Typography variant='h6' sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <AddCircleOutlineIcon fontSize='small' /> Receive STAS
+              </Typography>
+              <Typography variant='caption' color='text.secondary'>
+                Generates the next BRC-42 derived receive address. Share with a sender.
+              </Typography>
+            </Box>
+            <Button
+              variant='contained'
+              onClick={handleGenerateReceive}
+              disabled={generatingReceive}
+            >
+              {generatingReceive ? 'Generating…' : 'Generate new address'}
+            </Button>
+          </Stack>
+          {receiveError && (
+            <Typography variant='caption' color='error' sx={{ display: 'block', mt: 1 }}>
+              {receiveError}
+            </Typography>
+          )}
+          {receiveAddress && (
+            <Box
+              sx={{
+                mt: 2,
+                p: 1.5,
+                borderRadius: 1,
+                bgcolor: 'action.hover',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+              }}
+            >
+              <Box sx={{ flex: 1 }}>
+                <Typography variant='caption' color='text.secondary' display='block'>
+                  {receiveLabel}
+                </Typography>
+                <Typography
+                  variant='body1'
+                  sx={{ fontFamily: 'monospace', wordBreak: 'break-all', fontWeight: 600 }}
+                >
+                  {receiveAddress}
+                </Typography>
+              </Box>
+              <Tooltip title={receiveCopied ? 'Copied!' : 'Copy address'}>
+                <IconButton size='small' onClick={handleCopyReceive}>
+                  {receiveCopied ? <CheckIcon fontSize='small' /> : <ContentCopyIcon fontSize='small' />}
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Token groups */}
+      {groups.length === 0 && !loading && (
+        <Card>
+          <CardContent>
+            <Typography variant='body2' color='text.secondary' textAlign='center'>
+              No STAS holdings yet. Click "Generate new address" above and send STAS to it,
+              or use the dev panel's <em>Register STAS by txid</em> to register one manually.
+            </Typography>
+          </CardContent>
+        </Card>
+      )}
+
+      {groups.map((g) => {
+        const isExpanded = expanded.has(g.groupKey)
+        return (
+          <Card key={g.groupKey} sx={{ mb: 1.5 }}>
+            <CardContent
+              onClick={() => toggleExpand(g.groupKey)}
+              sx={{
+                cursor: 'pointer',
+                py: 1.5,
+                '&:last-child': { pb: 1.5 },
+                '&:hover': { bgcolor: 'action.hover' },
+              }}
+            >
+              <Stack direction='row' alignItems='center' spacing={2}>
+                <TokenIcon />
+                <Box sx={{ flex: 1 }}>
+                  <Typography variant='h6' sx={{ fontWeight: 600 }}>
+                    {g.name || g.symbol}
+                    {g.name && g.symbol !== g.name && (
+                      <Typography
+                        component='span'
+                        variant='body2'
+                        color='text.secondary'
+                        sx={{ ml: 1, fontWeight: 400 }}
+                      >
+                        ({g.symbol})
+                      </Typography>
+                    )}
+                  </Typography>
+                  <Stack direction='row' spacing={1} sx={{ mt: 0.5 }}>
+                    <Chip size='small' label={`${g.totalSatoshis.toLocaleString()} sats`} variant='outlined' />
+                    <Chip
+                      size='small'
+                      label={`${g.outputCount} ${g.outputCount === 1 ? 'UTXO' : 'UTXOs'}`}
+                      variant='outlined'
+                    />
+                    {g.spendableSatoshis < g.totalSatoshis && (
+                      <Chip
+                        size='small'
+                        label={`${g.spendableSatoshis.toLocaleString()} spendable`}
+                        variant='outlined'
+                        color='warning'
+                      />
+                    )}
+                    {g.tokenIds.size === 0 && (
+                      <Chip
+                        size='small'
+                        label='no tokenId'
+                        variant='outlined'
+                        color='warning'
+                        title='Classic STAS — tokenId derivation pending Task 7a-followup'
+                      />
+                    )}
+                  </Stack>
+                </Box>
+                <IconButton size='small'>
+                  {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                </IconButton>
+              </Stack>
+            </CardContent>
+
+            <Collapse in={isExpanded} unmountOnExit>
+              <Divider />
+              <Box sx={{ p: 1 }}>
+                {g.outputs.map((o) => (
+                  <Stack
+                    key={o.outpoint}
+                    direction='row'
+                    alignItems='center'
+                    spacing={2}
+                    sx={{
+                      p: 1.5,
+                      borderRadius: 1,
+                      '&:hover': { bgcolor: 'action.hover' },
+                    }}
+                  >
+                    <Box sx={{ flex: 1 }}>
+                      <Stack direction='row' spacing={1} alignItems='center'>
+                        <Typography
+                          variant='body2'
+                          sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                        >
+                          {o.satoshis.toLocaleString()} sats
+                        </Typography>
+                        {o.brc42KeyId && (
+                          <Chip size='small' label={o.brc42KeyId} variant='outlined' />
+                        )}
+                        {!o.spendable && (
+                          <Chip size='small' label='not spendable' color='warning' variant='outlined' />
+                        )}
+                        {o.frozen && <Chip size='small' label='frozen' color='error' />}
+                        {o.confiscated && <Chip size='small' label='confiscated' color='error' />}
+                      </Stack>
+                      <Typography
+                        variant='caption'
+                        color='text.secondary'
+                        sx={{ fontFamily: 'monospace', display: 'block' }}
+                      >
+                        {o.txid.substring(0, 16)}…:{o.vout}
+                        <a
+                          href={`https://whatsonchain.com/tx/${o.txid}`}
+                          target='_blank'
+                          rel='noreferrer'
+                          style={{
+                            color: 'inherit',
+                            marginLeft: 6,
+                            verticalAlign: 'middle',
+                            display: 'inline-flex',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <OpenInNewIcon sx={{ fontSize: 12 }} />
+                        </a>
+                      </Typography>
+                      <Typography variant='caption' color='text.secondary' display='block'>
+                        owner: {o.ownerAddress}
+                      </Typography>
+                    </Box>
+                    <Button
+                      size='small'
+                      variant='outlined'
+                      startIcon={<SendIcon fontSize='small' />}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openSend(o)
+                      }}
+                      disabled={!o.spendable || o.frozen || o.confiscated || !o.scriptHex || !o.brc42KeyId}
+                    >
+                      Send
+                    </Button>
+                  </Stack>
+                ))}
+              </Box>
+            </Collapse>
+          </Card>
+        )
+      })}
+
+      {/* Send dialog */}
+      <Dialog
+        open={!!sendTarget}
+        onClose={() => {
+          if (!sending) {
+            setSendTarget(null)
+            setSendResult(null)
+          }
+        }}
+        fullWidth
+        maxWidth='sm'
+      >
+        <DialogTitle>Send {sendTarget?.symbol ?? 'STAS'}</DialogTitle>
+        <DialogContent>
+          {sendTarget && (
+            <Stack spacing={2}>
+              <Box>
+                <Typography variant='caption' color='text.secondary'>
+                  Sending
+                </Typography>
+                <Typography variant='body1' sx={{ fontWeight: 600 }}>
+                  {sendTarget.satoshis.toLocaleString()} sats · {sendTarget.symbol ?? 'STAS'}
+                </Typography>
+                <Typography
+                  variant='caption'
+                  color='text.secondary'
+                  sx={{ fontFamily: 'monospace', display: 'block' }}
+                >
+                  from {sendTarget.brc42KeyId} ({sendTarget.ownerAddress.substring(0, 14)}…)
+                </Typography>
+              </Box>
+              <TextField
+                label='Recipient address'
+                value={sendRecipient}
+                onChange={(e) => setSendRecipient(e.target.value)}
+                fullWidth
+                placeholder='1...'
+                disabled={sending}
+                autoFocus
+              />
+              <Typography variant='caption' color='text.secondary'>
+                The wallet covers BSV fee automatically. After broadcast, the recipient
+                wallet picks up the STAS via auto-scan (or via the /stas/register-by-txid API).
+              </Typography>
+              {sendResult && (
+                <Typography
+                  variant='body2'
+                  color={sendResult.ok ? 'success.main' : 'error'}
+                  sx={{ wordBreak: 'break-all' }}
+                >
+                  {sendResult.message}
+                </Typography>
+              )}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setSendTarget(null)
+              setSendResult(null)
+            }}
+            disabled={sending}
+          >
+            Close
+          </Button>
+          <Button
+            variant='contained'
+            onClick={handleSendConfirm}
+            disabled={sending || !sendRecipient.trim() || sendResult?.ok}
+          >
+            {sending ? 'Sending…' : 'Send'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  )
+}

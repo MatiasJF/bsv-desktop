@@ -32,6 +32,7 @@ import CertificateAccess from './CertificateAccess'; // Assuming index.jsx or si
 import { WalletContext } from '../../WalletContext';
 import StasDebugPanel from './StasDebugPanel';
 import BasketsPage from './BasketsPage';
+import AssetsPage from './AssetsPage';
 // @ts-expect-error - Type issues with makeStyles
 const useStyles = makeStyles(style, {
   name: 'Dashboard'
@@ -114,6 +115,10 @@ export default function Dashboard() {
       <div className={classes.page_container}>
         <ErrorBoundary>
           <Switch>
+          <Route
+            path='/dashboard/assets'
+            component={AssetsPage}
+          />
           <Route
             path='/dashboard/stas'
             component={StasDebugPanel}
