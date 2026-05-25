@@ -312,4 +312,78 @@ export class StasQueries {
   async insertReceiveContext(row: StasReceiveContextRow): Promise<void> {
     await this.knex('stas_receive_contexts').insert(row);
   }
+
+  // --- resync snapshot ----------------------------------------------------
+
+  /**
+   * Export every STAS-relevant row in a stable, fingerprint-friendly shape.
+   * Used by the resync verification flow: take a snapshot pre-wipe, restore
+   * the wallet from mnemonic, take another snapshot, diff the two.
+   *
+   * Includes a canonical sort so two exports of equivalent states produce
+   * byte-identical JSON (handy for shell `diff`).
+   */
+  async exportStasState(profileIdentityKey: string): Promise<{
+    tokens: any[];
+    outputs: any[];
+    receiveContexts: any[];
+    profileIdentityKey: string;
+    exportedAt: string;
+  }> {
+    const tokens = await this.knex('stas_tokens')
+      .select(
+        'tokenId',
+        'symbol',
+        'name',
+        'satoshisPerToken',
+        'freezeEnabled',
+        'confiscationEnabled',
+        'redemptionPkh',
+        'issuerIdentityKey',
+        'flagsHex'
+      )
+      .orderBy('tokenId', 'asc');
+
+    const outputsRaw = await this.knex('stas_outputs as so')
+      .join('outputs as o', 'o.outputId', 'so.outputId')
+      .join('transactions as t', 't.transactionId', 'o.transactionId')
+      .select(
+        't.txid as txid',
+        'o.vout as vout',
+        'so.tokenId as tokenId',
+        'so.brc42KeyId as brc42KeyId',
+        'so.ownerFieldHash160 as ownerFieldHash160',
+        'so.tokenSatoshis as tokenSatoshis',
+        'so.frozen as frozen',
+        'so.confiscated as confiscated',
+        'o.spendable as spendable'
+      )
+      .orderBy('t.txid', 'asc')
+      .orderBy('o.vout', 'asc');
+
+    const outputs = outputsRaw.map((r: any) => ({
+      txid: r.txid,
+      vout: r.vout,
+      tokenId: r.tokenId,
+      brc42KeyId: r.brc42KeyId ?? null,
+      ownerFieldHash160: r.ownerFieldHash160,
+      tokenSatoshis: r.tokenSatoshis,
+      frozen: !!r.frozen,
+      confiscated: !!r.confiscated,
+      spendable: !!r.spendable,
+    }));
+
+    const receiveContexts = await this.knex('stas_receive_contexts')
+      .where({ profileIdentityKey })
+      .select('keyIndex', 'keyId', 'ownerFieldHash160', 'derivedPublicKey')
+      .orderBy('keyIndex', 'asc');
+
+    return {
+      tokens,
+      outputs,
+      receiveContexts,
+      profileIdentityKey,
+      exportedAt: new Date().toISOString(),
+    };
+  }
 }

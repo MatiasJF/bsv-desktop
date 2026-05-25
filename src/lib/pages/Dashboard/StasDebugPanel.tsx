@@ -41,6 +41,58 @@ interface ReceiveContextView {
   base58Address: string
 }
 
+interface StasStateSnapshot {
+  tokens: any[]
+  outputs: Array<{
+    txid: string
+    vout: number
+    tokenId: string
+    brc42KeyId: string | null
+    ownerFieldHash160: string
+    tokenSatoshis: number
+    frozen: boolean
+    confiscated: boolean
+    spendable: boolean
+  }>
+  receiveContexts: Array<{
+    keyIndex: number
+    keyId: string
+    ownerFieldHash160: string
+    derivedPublicKey: string
+  }>
+  profileIdentityKey: string
+  exportedAt: string
+}
+
+interface ResyncDiff {
+  ok: boolean
+  fileExportedAt: string
+  currentExportedAt: string
+  outputs: {
+    matching: number
+    missing: StasStateSnapshot['outputs']
+    extra: StasStateSnapshot['outputs']
+    corrupted: Array<{
+      outpoint: string
+      field: string
+      before: any
+      after: any
+    }>
+  }
+  receiveContexts: {
+    matching: number
+    missing: StasStateSnapshot['receiveContexts']
+    extra: StasStateSnapshot['receiveContexts']
+    corrupted: Array<{
+      keyIndex: number
+      field: string
+      before: any
+      after: any
+    }>
+  }
+  identityKeyMatch: boolean
+}
+
 export default function StasDebugPanel() {
   const { wallet, stas } = useContext(WalletContext)
 
@@ -73,6 +125,12 @@ export default function StasDebugPanel() {
   const [sendRecipient, setSendRecipient] = useState('')
   const [sending, setSending] = useState(false)
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  // Resync verification state.
+  const [resyncBusy, setResyncBusy] = useState(false)
+  const [resyncResult, setResyncResult] = useState<ResyncDiff | null>(null)
+  const [resyncError, setResyncError] = useState<string | null>(null)
+  const resyncFileInputRef = React.useRef<HTMLInputElement>(null)
 
   // Load (or refresh) the list of STAS in the wallet's basket.
   const loadStas = React.useCallback(async () => {
@@ -157,6 +215,166 @@ export default function StasDebugPanel() {
       setByTxidError(e instanceof Error ? e.message : String(e))
     } finally {
       setRegistering(false)
+    }
+  }
+
+  // Resync: export current STAS state as a JSON blob the user can download.
+  const handleResyncExport = async () => {
+    if (!stas?.keyDeriver) return
+    setResyncBusy(true)
+    setResyncError(null)
+    try {
+      const snapshot = (await stasQuery(
+        stas.keyDeriver.identityKey,
+        stas.keyDeriver.chain,
+        'exportStasState',
+        [stas.keyDeriver.identityKey]
+      )) as StasStateSnapshot
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const ts = new Date().toISOString().replace(/[:.]/g, '-')
+      a.href = url
+      a.download = `stas-state-${snapshot.profileIdentityKey.substring(0, 8)}-${ts}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setResyncError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResyncBusy(false)
+    }
+  }
+
+  // Resync: load a previously-exported snapshot and diff it against the
+  // current wallet state. Same identityKey expected.
+  const handleResyncVerify = async (file: File) => {
+    if (!stas?.keyDeriver) return
+    setResyncBusy(true)
+    setResyncError(null)
+    setResyncResult(null)
+    try {
+      const text = await file.text()
+      const before = JSON.parse(text) as StasStateSnapshot
+      const after = (await stasQuery(
+        stas.keyDeriver.identityKey,
+        stas.keyDeriver.chain,
+        'exportStasState',
+        [stas.keyDeriver.identityKey]
+      )) as StasStateSnapshot
+
+      const identityKeyMatch =
+        before.profileIdentityKey === after.profileIdentityKey
+
+      // Outputs: key by outpoint.
+      const beforeOuts = new Map(
+        before.outputs.map((o) => [`${o.txid}.${o.vout}`, o])
+      )
+      const afterOuts = new Map(
+        after.outputs.map((o) => [`${o.txid}.${o.vout}`, o])
+      )
+      let outsMatching = 0
+      const outsMissing: StasStateSnapshot['outputs'] = []
+      const outsExtra: StasStateSnapshot['outputs'] = []
+      const outsCorrupted: ResyncDiff['outputs']['corrupted'] = []
+      for (const [outpoint, b] of beforeOuts) {
+        const a = afterOuts.get(outpoint)
+        if (!a) {
+          outsMissing.push(b)
+          continue
+        }
+        const fields: (keyof StasStateSnapshot['outputs'][number])[] = [
+          'tokenId',
+          'brc42KeyId',
+          'ownerFieldHash160',
+          'tokenSatoshis',
+        ]
+        let ok = true
+        for (const f of fields) {
+          if (b[f] !== a[f]) {
+            outsCorrupted.push({
+              outpoint,
+              field: f as string,
+              before: b[f],
+              after: a[f],
+            })
+            ok = false
+          }
+        }
+        if (ok) outsMatching++
+      }
+      for (const [outpoint, a] of afterOuts) {
+        if (!beforeOuts.has(outpoint)) outsExtra.push(a)
+      }
+
+      // Receive contexts: key by keyIndex.
+      const beforeCtxs = new Map(before.receiveContexts.map((c) => [c.keyIndex, c]))
+      const afterCtxs = new Map(after.receiveContexts.map((c) => [c.keyIndex, c]))
+      let ctxsMatching = 0
+      const ctxsMissing: StasStateSnapshot['receiveContexts'] = []
+      const ctxsExtra: StasStateSnapshot['receiveContexts'] = []
+      const ctxsCorrupted: ResyncDiff['receiveContexts']['corrupted'] = []
+      for (const [k, b] of beforeCtxs) {
+        const a = afterCtxs.get(k)
+        if (!a) {
+          ctxsMissing.push(b)
+          continue
+        }
+        const fields: (keyof StasStateSnapshot['receiveContexts'][number])[] = [
+          'keyId',
+          'ownerFieldHash160',
+          'derivedPublicKey',
+        ]
+        let ok = true
+        for (const f of fields) {
+          if (b[f] !== a[f]) {
+            ctxsCorrupted.push({
+              keyIndex: k,
+              field: f as string,
+              before: b[f],
+              after: a[f],
+            })
+            ok = false
+          }
+        }
+        if (ok) ctxsMatching++
+      }
+      for (const [k, a] of afterCtxs) {
+        if (!beforeCtxs.has(k)) ctxsExtra.push(a)
+      }
+
+      const overallOk =
+        identityKeyMatch &&
+        outsMissing.length === 0 &&
+        outsCorrupted.length === 0 &&
+        ctxsMissing.length === 0 &&
+        ctxsCorrupted.length === 0
+
+      setResyncResult({
+        ok: overallOk,
+        fileExportedAt: before.exportedAt,
+        currentExportedAt: after.exportedAt,
+        outputs: {
+          matching: outsMatching,
+          missing: outsMissing,
+          extra: outsExtra,
+          corrupted: outsCorrupted,
+        },
+        receiveContexts: {
+          matching: ctxsMatching,
+          missing: ctxsMissing,
+          extra: ctxsExtra,
+          corrupted: ctxsCorrupted,
+        },
+        identityKeyMatch,
+      })
+    } catch (e) {
+      setResyncError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResyncBusy(false)
     }
   }
 
@@ -657,6 +875,153 @@ export default function StasDebugPanel() {
             {scanError}
           </Typography>
         )}
+
+        {/* ===== Resync verification ===== */}
+        <Divider sx={{ my: 2 }} />
+        <Box>
+          <Typography variant='subtitle1' sx={{ fontWeight: 600 }}>
+            Resync verification
+          </Typography>
+          <Typography variant='caption' color='text.secondary' display='block' sx={{ mb: 1 }}>
+            Snapshot the wallet's STAS state, wipe <code>~/.bsv-desktop/</code>,
+            restore from mnemonic, re-scan, then verify the recovered state
+            matches. Validates BRC-42 determinism + basket recovery.
+          </Typography>
+          <Stack direction='row' spacing={1} sx={{ mb: 1 }}>
+            <Button
+              variant='outlined'
+              size='small'
+              onClick={handleResyncExport}
+              disabled={resyncBusy || !stas?.keyDeriver}
+            >
+              {resyncBusy ? <CircularProgress size={14} /> : 'Export state'}
+            </Button>
+            <Button
+              variant='outlined'
+              size='small'
+              onClick={() => resyncFileInputRef.current?.click()}
+              disabled={resyncBusy || !stas?.keyDeriver}
+            >
+              Verify against file
+            </Button>
+            <input
+              ref={resyncFileInputRef}
+              type='file'
+              accept='application/json,.json'
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) handleResyncVerify(f)
+                e.target.value = ''
+              }}
+            />
+          </Stack>
+
+          {resyncError && (
+            <Typography color='error' variant='caption' display='block'>
+              {resyncError}
+            </Typography>
+          )}
+
+          {resyncResult && (
+            <Box
+              sx={{
+                mt: 1,
+                p: 1.5,
+                borderRadius: 1,
+                bgcolor: resyncResult.ok ? 'success.light' : 'error.light',
+                border: '1px solid',
+                borderColor: resyncResult.ok ? 'success.main' : 'error.main',
+              }}
+            >
+              <Typography variant='body2' sx={{ fontWeight: 600, mb: 0.5 }}>
+                {resyncResult.ok
+                  ? '✓ Resync clean — STAS state recovered identically'
+                  : '✗ Resync mismatch — see details below'}
+              </Typography>
+              <Typography variant='caption' display='block'>
+                file snapshot: {resyncResult.fileExportedAt} · current:{' '}
+                {resyncResult.currentExportedAt}
+              </Typography>
+              <Typography variant='caption' display='block'>
+                identityKey: {resyncResult.identityKeyMatch ? 'matches' : 'DIFFERS'}
+              </Typography>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                  Outputs
+                </Typography>
+                <Typography variant='caption' display='block'>
+                  {resyncResult.outputs.matching} matching ·{' '}
+                  {resyncResult.outputs.missing.length} missing ·{' '}
+                  {resyncResult.outputs.extra.length} extra ·{' '}
+                  {resyncResult.outputs.corrupted.length} corrupted
+                </Typography>
+                {resyncResult.outputs.missing.length > 0 && (
+                  <Box
+                    component='pre'
+                    sx={{
+                      fontSize: 10,
+                      m: 0,
+                      mt: 0.5,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    missing:{' '}
+                    {resyncResult.outputs.missing
+                      .map((o) => `${o.txid.substring(0, 12)}…:${o.vout}`)
+                      .join(', ')}
+                  </Box>
+                )}
+                {resyncResult.outputs.corrupted.length > 0 && (
+                  <Box
+                    component='pre'
+                    sx={{
+                      fontSize: 10,
+                      m: 0,
+                      mt: 0.5,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {JSON.stringify(resyncResult.outputs.corrupted, null, 2)}
+                  </Box>
+                )}
+              </Box>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                  Receive contexts (BRC-42 determinism)
+                </Typography>
+                <Typography variant='caption' display='block'>
+                  {resyncResult.receiveContexts.matching} matching ·{' '}
+                  {resyncResult.receiveContexts.missing.length} missing ·{' '}
+                  {resyncResult.receiveContexts.extra.length} extra ·{' '}
+                  {resyncResult.receiveContexts.corrupted.length} corrupted
+                </Typography>
+                {resyncResult.receiveContexts.corrupted.length > 0 && (
+                  <Box
+                    component='pre'
+                    sx={{
+                      fontSize: 10,
+                      m: 0,
+                      mt: 0.5,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-all',
+                    }}
+                  >
+                    {JSON.stringify(resyncResult.receiveContexts.corrupted, null, 2)}
+                  </Box>
+                )}
+                {resyncResult.receiveContexts.corrupted.length > 0 && (
+                  <Typography variant='caption' color='error' display='block' sx={{ mt: 0.5, fontWeight: 600 }}>
+                    ⚠ Corrupted receive contexts means BRC-42 derivation
+                    didn't replay the same keys. Filed as a real bug.
+                  </Typography>
+                )}
+              </Box>
+            </Box>
+          )}
+        </Box>
       </CardContent>
     </Card>
   )
