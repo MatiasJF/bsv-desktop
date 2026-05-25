@@ -34,7 +34,7 @@ import { buildPermissionModuleRegistry } from './permissionModules/registry'
 import type { PermissionModuleDefinition, PermissionPromptHandler } from './permissionModules/types'
 import type { GroupPermissionRequest, CounterpartyPermissionRequest } from './types/GroupedPermissions'
 import type { WalletProfile } from './types/WalletProfile'
-import { setStasDiscoveryForHttpRoute } from '../onWalletReady'
+import { setStasForHttpRoute } from '../onWalletReady'
 import { RequestInterceptorWallet } from './RequestInterceptorWallet'
 import { updateRecentApp } from './pages/Dashboard/Apps/getApps'
 
@@ -377,11 +377,23 @@ export const WalletContextProvider: React.FC<WalletContextProps> = ({
 
     const interceptorWallet = new RequestInterceptorWallet(managers.permissionsManager, Utils.toBase64(activeProfile.id), updateRecentAppWrapper)
     // onWalletReady registers IPC listener once, subsequent calls just swap
-    // wallet ref. STAS discovery (for the non-BRC-100 /stas/register-by-txid
-    // route on port 3321 — Task 5b) is injected via a separate setter so
+    // wallet ref. The STAS service bundle (for the Apps API routes
+    // /stas/list, /stas/tokens, /stas/transfer, /stas/receive-address,
+    // /stas/register-by-txid — Task 7a) is injected via a separate setter so
     // the prop interface stays single-arg.
     onWalletReady(interceptorWallet)
-    setStasDiscoveryForHttpRoute(walletServiceValues.stas?.discovery ?? null)
+    const stas = walletServiceValues.stas
+    if (stas?.keyDeriver && stas.discovery && stas.transfer) {
+      setStasForHttpRoute({
+        discovery: stas.discovery,
+        transfer: stas.transfer,
+        keyDeriver: stas.keyDeriver,
+        identityKey: stas.keyDeriver.identityKey,
+        chain: stas.keyDeriver.chain,
+      })
+    } else {
+      setStasForHttpRoute(null)
+    }
 
     // No cleanup — IPC listener is permanent, wallet ref is swapped not re-registered
   }, [managers?.permissionsManager, activeProfile?.id, onWalletReady])

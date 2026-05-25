@@ -1,3 +1,4 @@
+import { stasQuery } from './lib/services/stas/stasIpc';
 import {
   WalletInterface,
   CreateActionArgs,
@@ -138,6 +139,18 @@ function parseOrigin(headers: Record<string, string>): string | null {
 // Module-level wallet ref — survives React effect cleanup/re-runs
 let _currentWallet: WalletInterface | null = null;
 let _currentStasDiscovery: any = null;
+/**
+ * STAS service bundle exposed to the Apps API routes (Task 7a). Set from
+ * WalletContext via setStasForHttpRoute as soon as the WalletService's
+ * StasServices snapshot becomes available.
+ */
+let _currentStasBundle: {
+  discovery: any;
+  transfer: any;
+  keyDeriver: any;
+  identityKey: string;
+  chain: 'main' | 'test';
+} | null = null;
 let _listenerRegistered = false;
 
 /** Test-only: read current wallet ref */
@@ -161,6 +174,28 @@ export function setStasDiscoveryForHttpRoute(
   discovery: { registerByTxid: (txid: string) => Promise<any> } | null
 ): void {
   _currentStasDiscovery = discovery;
+}
+
+/**
+ * Inject (or clear) the full STAS service bundle for the Apps API routes
+ * (`/stas/list`, `/stas/tokens`, `/stas/receive-address`, `/stas/transfer`).
+ * Includes identityKey + chain so each route can drive stas:query without
+ * a separate lookup.
+ */
+export function setStasForHttpRoute(
+  bundle: {
+    discovery: any;
+    transfer: any;
+    keyDeriver: any;
+    identityKey: string;
+    chain: 'main' | 'test';
+  } | null
+): void {
+  _currentStasBundle = bundle;
+  // Backward-compat: the older single-purpose discovery setter remains
+  // populated for /stas/register-by-txid even if some callers haven't
+  // upgraded yet.
+  _currentStasDiscovery = bundle?.discovery ?? null;
 }
 
 /**
@@ -871,6 +906,255 @@ export const onWalletReady = async (
               body: JSON.stringify({
                 message: error instanceof Error ? error.message : String(error)
               }),
+            };
+          }
+          break;
+        }
+
+        // ===== STAS Apps API (Task 7a) =====
+        // Five HTTP routes that wrap the wallet's STAS surface so external
+        // BRC-100 apps don't have to re-implement the createAction +
+        // signAction plumbing from §12. Hides:
+        //   - basket fragmentation / spendable flag overrides
+        //   - inputBEEF construction with WoC fallback
+        //   - partialSTASUnlockingScript + signature digest semantics
+        //   - chain-of-state across discovery → transfer
+        // Apps just call `fetch('http://127.0.0.1:3321/stas/...')`.
+
+        case '/stas/list': {
+          if (!_currentStasBundle) {
+            response = {
+              request_id: req.request_id,
+              status: 503,
+              body: JSON.stringify({ error: 'STAS services not ready' }),
+            };
+            break;
+          }
+          try {
+            const { identityKey, chain } = _currentStasBundle;
+            const outputs: any[] =
+              (await stasQuery(
+                identityKey,
+                chain,
+                'listStasOutputs',
+                []
+              )) ?? [];
+            const tokens: any[] =
+              (await stasQuery(
+                identityKey,
+                chain,
+                'listStasTokens',
+                []
+              )) ?? [];
+            const tokenMap: Record<string, any> = {};
+            for (const t of tokens) tokenMap[t.tokenId] = t;
+            const holdings = outputs.map((o: any) => ({
+              outpoint: `${o.txid}.${o.vout}`,
+              txid: o.txid,
+              vout: o.vout,
+              satoshis: o.outputSatoshis ?? o.tokenSatoshis,
+              spendable: !!o.spendable,
+              tokenId: o.tokenId,
+              symbol: tokenMap[o.tokenId]?.symbol ?? null,
+              name: tokenMap[o.tokenId]?.name ?? null,
+              brc42KeyId: o.brc42KeyId ?? null,
+              ownerFieldHash160: o.ownerFieldHash160,
+              frozen: !!o.frozen,
+              confiscated: !!o.confiscated,
+            }));
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify({ holdings, total: holdings.length }),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
+        case '/stas/tokens': {
+          if (!_currentStasBundle) {
+            response = {
+              request_id: req.request_id,
+              status: 503,
+              body: JSON.stringify({ error: 'STAS services not ready' }),
+            };
+            break;
+          }
+          try {
+            const { identityKey, chain } = _currentStasBundle;
+            const tokens: any[] =
+              (await stasQuery(
+                identityKey,
+                chain,
+                'listStasTokens',
+                []
+              )) ?? [];
+            const outputs: any[] =
+              (await stasQuery(
+                identityKey,
+                chain,
+                'listStasOutputs',
+                []
+              )) ?? [];
+            // Aggregate counts + totalSatoshis per tokenId
+            const byToken: Record<string, { count: number; total: number }> = {};
+            for (const o of outputs) {
+              const tid = o.tokenId;
+              if (!tid) continue;
+              const stat = (byToken[tid] = byToken[tid] ?? { count: 0, total: 0 });
+              stat.count += 1;
+              stat.total += o.outputSatoshis ?? o.tokenSatoshis ?? 0;
+            }
+            const enhanced = tokens.map((t: any) => ({
+              tokenId: t.tokenId,
+              symbol: t.symbol,
+              name: t.name ?? null,
+              satoshisPerToken: t.satoshisPerToken,
+              freezeEnabled: !!t.freezeEnabled,
+              confiscationEnabled: !!t.confiscationEnabled,
+              redemptionPkh: t.redemptionPkh ?? null,
+              issuerIdentityKey: t.issuerIdentityKey ?? null,
+              outputCount: byToken[t.tokenId]?.count ?? 0,
+              totalSatoshis: byToken[t.tokenId]?.total ?? 0,
+            }));
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify({ tokens: enhanced }),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
+        case '/stas/receive-address': {
+          if (!_currentStasBundle?.keyDeriver) {
+            response = {
+              request_id: req.request_id,
+              status: 503,
+              body: JSON.stringify({ error: 'STAS services not ready' }),
+            };
+            break;
+          }
+          try {
+            const { keyDeriver } = _currentStasBundle;
+            const row = await keyDeriver.createNextReceiveContext();
+            // hash160 → base58 P2PKH address. We import dxs-bsv-token-sdk's
+            // Address inline so the route handler doesn't drag the dep into
+            // the top-level import block.
+            const dxs = await import('dxs-bsv-token-sdk/bsv');
+            const base58 = new (dxs as any).Address(
+              (dxs as any).fromHex(row.ownerFieldHash160)
+            ).Value as string;
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify({
+                address: base58,
+                ownerFieldHash160: row.ownerFieldHash160,
+                brc42KeyId: row.keyId,
+                keyIndex: row.keyIndex,
+              }),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
+        case '/stas/transfer': {
+          if (!_currentStasBundle?.transfer) {
+            response = {
+              request_id: req.request_id,
+              status: 503,
+              body: JSON.stringify({ error: 'STAS services not ready' }),
+            };
+            break;
+          }
+          try {
+            const { transfer, identityKey, chain } = _currentStasBundle;
+            const parsed = (req.body ? JSON.parse(req.body) : {}) as {
+              outpoint?: string;
+              recipientAddress?: string;
+            };
+            const outpoint = parsed.outpoint;
+            const recipientAddress = parsed.recipientAddress;
+            if (!outpoint || !recipientAddress) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({
+                  error: 'outpoint and recipientAddress are required',
+                }),
+              };
+              break;
+            }
+            const [txid, voutStr] = outpoint.split('.');
+            const vout = parseInt(voutStr, 10);
+            if (!/^[0-9a-f]{64}$/i.test(txid) || !Number.isInteger(vout) || vout < 0) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({ error: 'outpoint must be "<txid64hex>.<vout>"' }),
+              };
+              break;
+            }
+            // Look up the source's metadata from our satellite table.
+            const allOutputs: any[] =
+              (await stasQuery(
+                identityKey,
+                chain,
+                'listStasOutputs',
+                []
+              )) ?? [];
+            const source = allOutputs.find(
+              (o: any) => o.txid === txid && o.vout === vout
+            );
+            if (!source) {
+              response = {
+                request_id: req.request_id,
+                status: 404,
+                body: JSON.stringify({
+                  error: `STAS UTXO ${outpoint} not found in wallet`,
+                }),
+              };
+              break;
+            }
+            const result = await transfer.transfer({
+              source: {
+                txid: source.txid,
+                vout: source.vout,
+                scriptHex: source.lockingScript,
+                satoshis: source.outputSatoshis ?? source.tokenSatoshis,
+                brc42KeyId: source.brc42KeyId,
+              },
+              recipientAddress,
+            });
+            response = {
+              request_id: req.request_id,
+              status: result.ok ? 200 : 500,
+              body: JSON.stringify(result),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
             };
           }
           break;
