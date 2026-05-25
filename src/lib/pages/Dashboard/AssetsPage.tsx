@@ -60,6 +60,10 @@ interface OutputView {
   scriptHex: string | null
   frozen: boolean
   confiscated: boolean
+  /** Set when wallet-toolbox marked this row as spent (consumed by a tx). */
+  spentBy: string | null
+  /** ISO timestamp from stas_outputs.createdAt — used for activity ordering. */
+  createdAt: string | null
 }
 
 interface TokenGroup {
@@ -111,6 +115,8 @@ export default function AssetsPage() {
   const { wallet, stas } = useContext(WalletContext)
 
   const [holdings, setHoldings] = useState<OutputView[]>([])
+  const [sentHoldings, setSentHoldings] = useState<OutputView[]>([])
+  const [activityExpanded, setActivityExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [scanSummary, setScanSummary] = useState<string | null>(null)
@@ -139,13 +145,17 @@ export default function AssetsPage() {
     setLoading(true)
     setError(null)
     try {
-      const [outputsRaw, tokensRaw]: [any[], any[]] = await Promise.all([
+      // Fetch both current (default) and the full set (includeSpent: true).
+      // The full set lets us build the Activity feed alongside the live holdings.
+      const [outputsRaw, allRaw, tokensRaw]: [any[], any[], any[]] = await Promise.all([
         stasQuery(identityKey, chain, 'listStasOutputs', []),
+        stasQuery(identityKey, chain, 'listStasOutputs', [{ includeSpent: true }]),
         stasQuery(identityKey, chain, 'listStasTokens', []),
       ])
       const tokenMap: Record<string, any> = {}
       for (const t of tokensRaw ?? []) tokenMap[t.tokenId] = t
-      const mapped: OutputView[] = (outputsRaw ?? []).map((o: any) => ({
+
+      const toView = (o: any): OutputView => ({
         outpoint: `${o.txid}.${o.vout}`,
         txid: o.txid,
         vout: o.vout,
@@ -160,8 +170,18 @@ export default function AssetsPage() {
         scriptHex: o.lockingScript ?? null,
         frozen: !!o.frozen,
         confiscated: !!o.confiscated,
-      }))
-      setHoldings(mapped)
+        spentBy: o.spentBy ?? null,
+        createdAt: o.createdAt ?? null,
+      })
+
+      setHoldings((outputsRaw ?? []).map(toView))
+      // Sent = anything from the "all" set that has spentBy set (and isn't in
+      // the current set). Newest first by createdAt (best proxy we have).
+      const sent = (allRaw ?? [])
+        .filter((o: any) => o?.spentBy)
+        .map(toView)
+        .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+      setSentHoldings(sent)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -591,6 +611,117 @@ export default function AssetsPage() {
           </Card>
         )
       })}
+
+      {/* Activity — sent STAS history (uses includeSpent:true on listStasOutputs) */}
+      {sentHoldings.length > 0 && (
+        <Card sx={{ mt: 2 }}>
+          <CardContent
+            onClick={() => setActivityExpanded((v) => !v)}
+            sx={{
+              cursor: 'pointer',
+              py: 1.5,
+              '&:last-child': { pb: 1.5 },
+              '&:hover': { bgcolor: 'action.hover' },
+            }}
+          >
+            <Stack direction='row' alignItems='center' spacing={2}>
+              <SendIcon fontSize='small' />
+              <Box sx={{ flex: 1 }}>
+                <Typography variant='subtitle1' sx={{ fontWeight: 600 }}>
+                  Recent activity
+                </Typography>
+                <Typography variant='caption' color='text.secondary'>
+                  {sentHoldings.length} STAS {sentHoldings.length === 1 ? 'transfer' : 'transfers'} sent from this wallet
+                </Typography>
+              </Box>
+              <IconButton size='small'>
+                {activityExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+              </IconButton>
+            </Stack>
+          </CardContent>
+          <Collapse in={activityExpanded} unmountOnExit>
+            <Divider />
+            <Box sx={{ p: 1 }}>
+              {sentHoldings.map((o) => (
+                <Stack
+                  key={o.outpoint}
+                  direction='row'
+                  alignItems='center'
+                  spacing={2}
+                  sx={{
+                    p: 1.5,
+                    borderRadius: 1,
+                    '&:hover': { bgcolor: 'action.hover' },
+                  }}
+                >
+                  <Chip
+                    size='small'
+                    label='SENT'
+                    color='warning'
+                    variant='outlined'
+                    sx={{ minWidth: 64 }}
+                  />
+                  <Box sx={{ flex: 1 }}>
+                    <Stack direction='row' spacing={1} alignItems='center'>
+                      <Typography
+                        variant='body2'
+                        sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                      >
+                        {o.satoshis.toLocaleString()} sats
+                      </Typography>
+                      {o.symbol && (
+                        <Chip size='small' label={o.symbol} variant='outlined' />
+                      )}
+                      {o.brc42KeyId && (
+                        <Chip size='small' label={`from ${o.brc42KeyId}`} variant='outlined' />
+                      )}
+                    </Stack>
+                    <Typography
+                      variant='caption'
+                      color='text.secondary'
+                      sx={{ fontFamily: 'monospace', display: 'block' }}
+                    >
+                      <span>source </span>
+                      <a
+                        href={`https://whatsonchain.com/tx/${o.txid}`}
+                        target='_blank'
+                        rel='noreferrer'
+                        style={{ color: 'inherit' }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {o.txid.substring(0, 14)}…:{o.vout}
+                      </a>
+                    </Typography>
+                    {o.spentBy && (
+                      <Typography
+                        variant='caption'
+                        color='text.secondary'
+                        sx={{ fontFamily: 'monospace', display: 'block' }}
+                      >
+                        <span>spent in </span>
+                        <a
+                          href={`https://whatsonchain.com/tx/${o.spentBy}`}
+                          target='_blank'
+                          rel='noreferrer'
+                          style={{ color: 'inherit' }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {o.spentBy.substring(0, 14)}…
+                        </a>
+                      </Typography>
+                    )}
+                    {o.createdAt && (
+                      <Typography variant='caption' color='text.secondary' display='block'>
+                        received {new Date(o.createdAt).toLocaleString()}
+                      </Typography>
+                    )}
+                  </Box>
+                </Stack>
+              ))}
+            </Box>
+          </Collapse>
+        </Card>
+      )}
 
       {/* Send dialog */}
       <Dialog
