@@ -135,6 +135,32 @@ export class StasTransferService {
       };
     }
 
+    // ---- diagnostic: surface the field-level expectations engine eval cares about ----
+    /* eslint-disable no-console */
+    try {
+      const sourceOwnerPkh = sh.substring(6, 46);
+      const newOwnerPkh = newStasScriptHex.substring(6, 46);
+      const headSame = newStasScriptHex.substring(0, 6) === sh.substring(0, 6);
+      const tailSame = newStasScriptHex.substring(46) === sh.substring(46);
+      const lengthSame = newStasScriptHex.length === sh.length;
+      console.log('[stas-transfer] source pkh →', sourceOwnerPkh);
+      console.log('[stas-transfer] new pkh    →', newOwnerPkh, '(matches recipient:', newOwnerPkh === recipientPkhHex, ')');
+      console.log('[stas-transfer] source.satoshis =', source.satoshis);
+      console.log('[stas-transfer] stas version =', stasVersion);
+      console.log('[stas-transfer] new script invariants — length same:', lengthSame, '· head same:', headSame, '· tail same:', tailSame);
+      if (!tailSame) {
+        // Surface the first diverging byte if the engine/tail isn't preserved.
+        const len = Math.min(newStasScriptHex.length, sh.length);
+        let firstDiff = -1;
+        for (let i = 46; i < len; i++) {
+          if (newStasScriptHex[i] !== sh[i]) { firstDiff = i; break; }
+        }
+        console.log('[stas-transfer] first diverging hex index past owner-pkh:', firstDiff,
+          firstDiff >= 0 ? `(source="${sh.substring(firstDiff, firstDiff + 12)}…" new="${newStasScriptHex.substring(firstDiff, firstDiff + 12)}…")` : '');
+      }
+    } catch { /* never block on logging */ }
+    /* eslint-enable no-console */
+
     // 4. Build inputBEEF (Services + WoC fallback).
     let inputBEEF: number[];
     try {
