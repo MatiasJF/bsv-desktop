@@ -112,6 +112,8 @@ export default function AssetsPage() {
 
   const [holdings, setHoldings] = useState<OutputView[]>([])
   const [loading, setLoading] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const [scanSummary, setScanSummary] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
@@ -167,9 +169,44 @@ export default function AssetsPage() {
     }
   }, [identityKey, chain])
 
+  // Wraps loadHoldings with a real Bitails discovery scan first — picks up
+  // STAS that arrived after the wallet's startup auto-scan. Without this the
+  // page would only ever surface what's already in the local satellite, and
+  // freshly received UTXOs stay invisible until the user manually scans from
+  // the dev panel.
+  const handleScan = useCallback(async () => {
+    if (!stas?.discovery) {
+      // No discovery service available — fall back to local refresh.
+      await loadHoldings()
+      return
+    }
+    setScanning(true)
+    setScanSummary(null)
+    try {
+      const r = await stas.discovery.scan()
+      const bits: string[] = []
+      bits.push(`${r.candidates ?? 0} found`)
+      if ((r.registered ?? 0) > 0) bits.push(`${r.registered} new`)
+      if ((r.skippedAlreadyKnown ?? 0) > 0) bits.push(`${r.skippedAlreadyKnown} already known`)
+      if ((r.deferred ?? 0) > 0) bits.push(`${r.deferred} deferred`)
+      if ((r.errors?.length ?? 0) > 0) bits.push(`${r.errors.length} errors`)
+      setScanSummary(bits.join(' · '))
+    } catch (e) {
+      setScanSummary(`scan failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setScanning(false)
+    }
+    await loadHoldings()
+  }, [stas?.discovery, loadHoldings])
+
   useEffect(() => {
-    if (stas?.keyDeriver) loadHoldings()
-  }, [stas?.keyDeriver, loadHoldings])
+    if (!stas?.keyDeriver) return
+    // First load: local-only (fast paint) plus a real scan in the background
+    // so freshly arrived STAS show up without the user pressing anything.
+    loadHoldings()
+    handleScan()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stas?.keyDeriver])
 
   const allGroups = useMemo(() => groupByToken(holdings), [holdings])
 
@@ -304,15 +341,22 @@ export default function AssetsPage() {
                 }}
               />
             </Box>
-            <Button
-              size='small'
-              variant='outlined'
-              startIcon={loading ? <CircularProgress size={14} /> : <RefreshIcon />}
-              onClick={loadHoldings}
-              disabled={loading}
-            >
-              {loading ? 'Loading…' : 'Refresh'}
-            </Button>
+            <Stack spacing={1} alignItems='flex-end'>
+              <Button
+                size='small'
+                variant='outlined'
+                startIcon={(loading || scanning) ? <CircularProgress size={14} /> : <RefreshIcon />}
+                onClick={handleScan}
+                disabled={loading || scanning}
+              >
+                {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Scan for STAS'}
+              </Button>
+              {scanSummary && (
+                <Typography variant='caption' color='text.secondary' sx={{ maxWidth: 240, textAlign: 'right' }}>
+                  {scanSummary}
+                </Typography>
+              )}
+            </Stack>
           </Stack>
           {error && (
             <Typography variant='caption' color='error' sx={{ display: 'block', mt: 1 }}>
