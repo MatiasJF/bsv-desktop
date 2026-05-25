@@ -97,14 +97,42 @@ export class StasTransferService {
       return { ok: false, reason: `invalid recipient: ${errMsg(err)}` };
     }
 
-    // 3. Build new STAS locking script.
+    // 3. Validate the source is a classic STAS shape. stas-js's updateStasScript
+    //    enforces this internally, but its error message ("Invalid STAS script")
+    //    doesn't tell the caller *why*. Pre-check so the failure mode is
+    //    actionable — most often the user picked a DSTAS UTXO (different
+    //    engine), or the lockingScript wasn't surfaced by listStasOutputs.
+    const sh = source.scriptHex;
+    if (typeof sh !== 'string' || sh.length < 56) {
+      return {
+        ok: false,
+        reason: `source.scriptHex missing or too short (type=${typeof sh}, length=${sh?.length ?? 0})`,
+      };
+    }
+    if (!sh.startsWith('76a914')) {
+      return {
+        ok: false,
+        reason: `source isn't a classic STAS script — prefix is "${sh.substring(0, 20)}…". DSTAS send isn't supported by the wallet yet; pick a classic STAS UTXO.`,
+      };
+    }
+    if (sh.substring(46, 52) !== '88ac69') {
+      return {
+        ok: false,
+        reason: `source isn't a classic STAS script — engine marker missing at offset 46 (got "${sh.substring(46, 52)}", expected "88ac69")`,
+      };
+    }
+
+    // 4. Build new STAS locking script.
     let newStasScriptHex: string;
     let stasVersion: number;
     try {
-      newStasScriptHex = updateStasScript(recipientPkhHex, source.scriptHex);
-      stasVersion = getVersion(source.scriptHex);
+      newStasScriptHex = updateStasScript(recipientPkhHex, sh);
+      stasVersion = getVersion(sh);
     } catch (err) {
-      return { ok: false, reason: `script build: ${errMsg(err)}` };
+      return {
+        ok: false,
+        reason: `script build: ${errMsg(err)} (prefix ${sh.substring(0, 32)}…)`,
+      };
     }
 
     // 4. Build inputBEEF (Services + WoC fallback).
