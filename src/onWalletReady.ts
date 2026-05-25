@@ -1225,10 +1225,18 @@ export const onWalletReady = async (
               body: JSON.stringify(result),
             };
           } catch (e) {
+            // Surface the actual exception so future failures are easier to
+            // diagnose than a bare 500. Goes to the renderer's DevTools
+            // console where you can read it.
+            // eslint-disable-next-line no-console
+            console.error('[stas/transfer] handler threw:', e);
             response = {
               request_id: req.request_id,
               status: 500,
-              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+              body: JSON.stringify({
+                ok: false,
+                reason: e instanceof Error ? e.message : String(e),
+              }),
             };
           }
           break;
