@@ -73,19 +73,42 @@ export class StasQueries {
 
   // --- outputs ------------------------------------------------------------
 
-  /** STAS outputs joined to wallet-toolbox's authoritative `outputs` row. */
-  async listStasOutputs(filter: { tokenId?: string } = {}): Promise<any[]> {
+  /**
+   * STAS outputs the wallet STILL OWNS — joins our satellite to the wallet-
+   * toolbox `outputs` row and filters by `spentBy IS NULL`.
+   *
+   * wallet-toolbox's spend lifecycle:
+   *   - own + available  →  spendable=1, spentBy=NULL
+   *   - in-flight spend  →  spendable=0, spentBy=<txid>
+   *   - finalised spend  →  spendable=0, spentBy=<txid>
+   *   - unspent revert   →  spendable=1, spentBy=NULL (set by wallet-toolbox
+   *                          when the spending tx fails to confirm)
+   *
+   * Filter on `spentBy IS NULL` rather than `spendable=1` because we
+   * deliberately set `spendable=1` on STAS at register-time (the toolbox
+   * conservatively defaults it to 0 for non-template scripts). `spentBy`
+   * is the unambiguous "this is gone" signal.
+   *
+   * Pass `includeSpent: true` to surface fully sent STAS too (for history /
+   * activity views — not exposed via the Apps API by default).
+   */
+  async listStasOutputs(filter: {
+    tokenId?: string;
+    includeSpent?: boolean;
+  } = {}): Promise<any[]> {
     let q = this.knex('stas_outputs')
       .join('outputs', 'outputs.outputId', 'stas_outputs.outputId')
       .select(
         'stas_outputs.*',
         'outputs.satoshis as outputSatoshis',
         'outputs.spendable',
+        'outputs.spentBy',
         'outputs.txid',
         'outputs.vout',
         'outputs.lockingScript' // bytes — converted to hex below for the transfer UI
       );
     if (filter.tokenId) q = q.where('stas_outputs.tokenId', filter.tokenId);
+    if (!filter.includeSpent) q = q.whereNull('outputs.spentBy');
     const rows = await q;
     // outputs.lockingScript is stored as Buffer in SQLite (BLOB). Convert to
     // hex so renderer-side consumers (Transfer UI) get a usable string.
@@ -123,10 +146,13 @@ export class StasQueries {
   }
 
   /**
-   * Backfill: flip `outputs.spendable=1` on every output currently in the
-   * stas-tokens basket. Called by StasDiscoveryService.scan to repair the
-   * wallet-toolbox conservative default for any STAS that was registered
-   * before we auto-flipped at register-time.
+   * Backfill: flip `outputs.spendable=1` on STAS basket outputs that the
+   * wallet still owns. Critical guard: only updates rows where `spentBy
+   * IS NULL` so we don't resurrect already-spent UTXOs.
+   *
+   * Called by StasDiscoveryService.scan to repair the wallet-toolbox
+   * conservative default for any STAS registered before the auto-flip
+   * fix landed.
    */
   async backfillStasSpendable(): Promise<{ updated: number }> {
     const basket = await this.knex('output_baskets')
@@ -136,6 +162,7 @@ export class StasQueries {
     const updated = await this.knex('outputs')
       .where({ basketId: basket.basketId })
       .andWhere({ spendable: 0 })
+      .whereNull('spentBy')
       .update({ spendable: 1 });
     return { updated };
   }
