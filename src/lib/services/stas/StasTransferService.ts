@@ -288,6 +288,16 @@ export class StasTransferService {
       }
 
       /* eslint-disable no-console */
+      console.log('[stas-transfer] tx.inputs.length=', tx.inputs.length);
+      for (let i = 0; i < tx.inputs.length; i++) {
+        const inp = tx.inputs[i];
+        const prevTxidHex =
+          typeof inp.prevTxId === 'string'
+            ? inp.prevTxId
+            : Buffer.from(inp.prevTxId).toString('hex');
+        const tag = i === 0 ? '(STAS)' : i === tx.inputs.length - 1 ? '(funding-last)' : '(extra)';
+        console.log(`  in ${i} ${tag}: ${prevTxidHex.substring(0, 16)}…:${inp.outputIndex}`);
+      }
       console.log('[stas-transfer] outputs.length=', tx.outputs.length);
       for (let v = 0; v < tx.outputs.length; v++) {
         console.log(`  out ${v}: ${tx.outputs[v].satoshis} sats, len=${tx.outputs[v].script.toHex().length / 2}`);
