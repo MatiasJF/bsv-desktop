@@ -1219,9 +1219,19 @@ export const onWalletReady = async (
               },
               recipientAddress,
             });
+            // Always return 200 when the transfer service produced a result —
+            // success/failure is in the body's `ok` field. Reserve 500 for
+            // actual handler exceptions (caught below). Previously a
+            // failed-but-clean result mapped to 500, which made consumers'
+            // generic HTTP-error handlers print "Internal Server Error"
+            // instead of the real reason.
+            if (!result.ok) {
+              // eslint-disable-next-line no-console
+              console.warn('[stas/transfer] service reported failure:', result.reason);
+            }
             response = {
               request_id: req.request_id,
-              status: result.ok ? 200 : 500,
+              status: 200,
               body: JSON.stringify(result),
             };
           } catch (e) {
