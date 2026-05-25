@@ -151,6 +151,23 @@ let _currentStasBundle: {
   identityKey: string;
   chain: 'main' | 'test';
 } | null = null;
+/**
+ * Permission gate for /stas/transfer. Set by WalletContext, called by the
+ * route handler with the transfer details. Resolves true (approve) or false
+ * (deny) once the user clicks one of the modal buttons.
+ */
+type StasTransferPermissionArgs = {
+  originator: string;
+  outpoint: string;
+  symbol: string | null;
+  tokenId: string | null;
+  satoshis: number;
+  recipient: string;
+  brc42KeyId: string | null;
+};
+let _currentStasTransferEnqueuer:
+  | ((args: StasTransferPermissionArgs) => Promise<boolean>)
+  | null = null;
 let _listenerRegistered = false;
 
 /** Test-only: read current wallet ref */
@@ -196,6 +213,16 @@ export function setStasForHttpRoute(
   // populated for /stas/register-by-txid even if some callers haven't
   // upgraded yet.
   _currentStasDiscovery = bundle?.discovery ?? null;
+}
+
+/**
+ * Inject (or clear) the permission-prompt enqueuer used by /stas/transfer
+ * to gate external app calls on user approval. Set by WalletContext.
+ */
+export function setStasTransferEnqueuer(
+  fn: ((args: StasTransferPermissionArgs) => Promise<boolean>) | null
+): void {
+  _currentStasTransferEnqueuer = fn;
 }
 
 /**
@@ -1135,6 +1162,53 @@ export const onWalletReady = async (
               };
               break;
             }
+
+            // Permission gate: surface a modal to the user before we sign
+            // and broadcast. The enqueuer is set by WalletContext;
+            // if it's missing (e.g. the page is still mounting on first
+            // boot) we fail closed with 503 rather than silently sign.
+            if (!_currentStasTransferEnqueuer) {
+              response = {
+                request_id: req.request_id,
+                status: 503,
+                body: JSON.stringify({
+                  ok: false,
+                  reason: 'STAS transfer permission gate not ready',
+                }),
+              };
+              break;
+            }
+            // Look up the token's symbol so the prompt shows something
+            // meaningful (otherwise it would just say "100 sats").
+            let tokenSymbol: string | null = null;
+            try {
+              const tokens: any[] =
+                (await stasQuery(identityKey, chain, 'listStasTokens', [])) ?? [];
+              const tok = tokens.find((t: any) => t.tokenId === source.tokenId);
+              tokenSymbol = tok?.symbol ?? null;
+            } catch { /* best effort */ }
+
+            const approved = await _currentStasTransferEnqueuer({
+              originator: origin || 'unknown',
+              outpoint,
+              symbol: tokenSymbol,
+              tokenId: source.tokenId ?? null,
+              satoshis: source.outputSatoshis ?? source.tokenSatoshis,
+              recipient: recipientAddress,
+              brc42KeyId: source.brc42KeyId ?? null,
+            });
+            if (!approved) {
+              response = {
+                request_id: req.request_id,
+                status: 403,
+                body: JSON.stringify({
+                  ok: false,
+                  reason: 'transfer denied by user',
+                }),
+              };
+              break;
+            }
+
             const result = await transfer.transfer({
               source: {
                 txid: source.txid,
