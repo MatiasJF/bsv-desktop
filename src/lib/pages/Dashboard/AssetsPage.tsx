@@ -39,6 +39,8 @@ import SendIcon from '@mui/icons-material/Send'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import TokenIcon from '@mui/icons-material/Token'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
+import SearchIcon from '@mui/icons-material/Search'
+import { QRCodeSVG } from 'qrcode.react'
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv'
 import { WalletContext } from '../../WalletContext'
 import { stasQuery } from '../../services/stas'
@@ -124,6 +126,9 @@ export default function AssetsPage() {
   const [sending, setSending] = useState(false)
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
 
+  // Filter state — applied to groups by symbol, name, or tokenId.
+  const [filter, setFilter] = useState('')
+
   const identityKey = stas?.keyDeriver?.identityKey
   const chain = stas?.keyDeriver?.chain
 
@@ -166,7 +171,20 @@ export default function AssetsPage() {
     if (stas?.keyDeriver) loadHoldings()
   }, [stas?.keyDeriver, loadHoldings])
 
-  const groups = useMemo(() => groupByToken(holdings), [holdings])
+  const allGroups = useMemo(() => groupByToken(holdings), [holdings])
+
+  const groups = useMemo(() => {
+    const needle = filter.trim().toLowerCase()
+    if (!needle) return allGroups
+    return allGroups.filter((g) => {
+      if (g.symbol.toLowerCase().includes(needle)) return true
+      if (g.name && g.name.toLowerCase().includes(needle)) return true
+      for (const id of g.tokenIds) {
+        if (id.toLowerCase().includes(needle)) return true
+      }
+      return false
+    })
+  }, [allGroups, filter])
 
   const totalSats = useMemo(() => holdings.reduce((s, o) => s + o.satoshis, 0), [holdings])
 
@@ -263,7 +281,7 @@ export default function AssetsPage() {
               <Stack direction='row' spacing={2} sx={{ mt: 2 }}>
                 <Chip
                   icon={<TokenIcon />}
-                  label={`${groups.length} ${groups.length === 1 ? 'token' : 'tokens'}`}
+                  label={`${allGroups.length} ${allGroups.length === 1 ? 'token' : 'tokens'}`}
                 />
                 <Chip
                   label={`${holdings.length} ${holdings.length === 1 ? 'output' : 'outputs'}`}
@@ -275,6 +293,16 @@ export default function AssetsPage() {
                   color='primary'
                 />
               </Stack>
+              <TextField
+                size='small'
+                placeholder='Filter by symbol, name, or tokenId…'
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                sx={{ mt: 2, minWidth: 320 }}
+                InputProps={{
+                  startAdornment: <SearchIcon fontSize='small' sx={{ mr: 1, color: 'text.secondary' }} />,
+                }}
+              />
             </Box>
             <Button
               size='small'
@@ -325,18 +353,26 @@ export default function AssetsPage() {
             </Typography>
           )}
           {receiveAddress && (
-            <Box
-              sx={{
-                mt: 2,
-                p: 1.5,
-                borderRadius: 1,
-                bgcolor: 'action.hover',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1,
-              }}
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={2}
+              alignItems={{ xs: 'stretch', sm: 'center' }}
+              sx={{ mt: 2, p: 1.5, borderRadius: 1, bgcolor: 'action.hover' }}
             >
-              <Box sx={{ flex: 1 }}>
+              <Box
+                sx={{
+                  p: 1,
+                  bgcolor: 'background.paper',
+                  borderRadius: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  alignSelf: { xs: 'center', sm: 'flex-start' },
+                }}
+              >
+                <QRCodeSVG value={receiveAddress} size={140} includeMargin={false} />
+              </Box>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
                 <Typography variant='caption' color='text.secondary' display='block'>
                   {receiveLabel}
                 </Typography>
@@ -346,13 +382,18 @@ export default function AssetsPage() {
                 >
                   {receiveAddress}
                 </Typography>
+                <Tooltip title={receiveCopied ? 'Copied!' : 'Copy address'}>
+                  <Button
+                    size='small'
+                    startIcon={receiveCopied ? <CheckIcon /> : <ContentCopyIcon />}
+                    onClick={handleCopyReceive}
+                    sx={{ mt: 1 }}
+                  >
+                    {receiveCopied ? 'Copied' : 'Copy address'}
+                  </Button>
+                </Tooltip>
               </Box>
-              <Tooltip title={receiveCopied ? 'Copied!' : 'Copy address'}>
-                <IconButton size='small' onClick={handleCopyReceive}>
-                  {receiveCopied ? <CheckIcon fontSize='small' /> : <ContentCopyIcon fontSize='small' />}
-                </IconButton>
-              </Tooltip>
-            </Box>
+            </Stack>
           )}
         </CardContent>
       </Card>
@@ -413,14 +454,14 @@ export default function AssetsPage() {
                         color='warning'
                       />
                     )}
-                    {g.tokenIds.size === 0 && (
-                      <Chip
-                        size='small'
-                        label='no tokenId'
-                        variant='outlined'
-                        color='warning'
-                        title='Classic STAS — tokenId derivation pending Task 7a-followup'
-                      />
+                    {g.tokenIds.size > 0 && (
+                      <Tooltip title={Array.from(g.tokenIds).join(', ')}>
+                        <Chip
+                          size='small'
+                          label={`id ${Array.from(g.tokenIds)[0].substring(0, 8)}…`}
+                          variant='outlined'
+                        />
+                      </Tooltip>
                     )}
                   </Stack>
                 </Box>

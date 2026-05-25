@@ -123,6 +123,24 @@ export class StasQueries {
   }
 
   /**
+   * Backfill: flip `outputs.spendable=1` on every output currently in the
+   * stas-tokens basket. Called by StasDiscoveryService.scan to repair the
+   * wallet-toolbox conservative default for any STAS that was registered
+   * before we auto-flipped at register-time.
+   */
+  async backfillStasSpendable(): Promise<{ updated: number }> {
+    const basket = await this.knex('output_baskets')
+      .where({ name: 'stas-tokens', isDeleted: 0 })
+      .first('basketId');
+    if (!basket) return { updated: 0 };
+    const updated = await this.knex('outputs')
+      .where({ basketId: basket.basketId })
+      .andWhere({ spendable: 0 })
+      .update({ spendable: 1 });
+    return { updated };
+  }
+
+  /**
    * Override the `default` (change) basket's `numberOfDesiredUTXOs`.
    *
    * Wallet-toolbox's `generateChange` aims for this many UTXOs in the change

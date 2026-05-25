@@ -17,6 +17,9 @@ import { STAS_BASKET } from '../../constants/baskets';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 import type { ParsedDstas } from './dstasParser';
 
+/** Classic-STAS parsed payload extends ParsedDstas with optional symbol. */
+type RichParsed = ParsedDstas & { symbol?: string };
+
 export interface RegisterStasArgs {
   txid: string;
   vout: number;
@@ -26,8 +29,8 @@ export interface RegisterStasArgs {
   ownerFieldHash160: string;
   /** BRC-42 keyID, e.g. `"recv 7"`. */
   brc42KeyId: string;
-  /** Parsed DSTAS fields. */
-  parsed: ParsedDstas;
+  /** Parsed DSTAS fields. Classic STAS also carries an optional `symbol`. */
+  parsed: RichParsed;
 }
 
 export interface RegisterStasResult {
@@ -130,12 +133,14 @@ export class StasRegistration {
         await this.stasQuery('upsertStasToken', [
           {
             tokenId: parsed.tokenId,
-            symbol: 'STAS', // refined when richer parsing lands in Task 5
+            symbol: (parsed as RichParsed).symbol ?? 'STAS',
             name: undefined,
             satoshisPerToken: 1,
             freezeEnabled: parsed.freezeEnabled,
             confiscationEnabled: parsed.confiscationEnabled,
-            redemptionPkh: parsed.tokenId,
+            // redemptionPkh remains the parsed value for DSTAS; classic STAS
+            // doesn't carry one in the engine, so we leave it null-ish.
+            redemptionPkh: parsed.tokenId === '' ? undefined : parsed.tokenId,
             issuerIdentityKey: undefined,
             flagsHex: parsed.flagsHex,
             createdAt: now,
@@ -155,6 +160,12 @@ export class StasRegistration {
             updatedAt: now,
           },
         ]);
+        // STAS outputs land with `spendable=false` because wallet-toolbox
+        // can't recognise the custom script as one it knows how to unlock.
+        // We sign externally via the BRC-42 path, so the flag is a false
+        // negative — flip it now so the user can transfer the UTXO without
+        // an extra preflight step at send-time.
+        await this.stasQuery('setOutputSpendable', [outputId, true]);
       }
     } catch (err) {
       // The token is internalized regardless; satellite linkage is best-effort.
