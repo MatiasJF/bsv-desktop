@@ -132,6 +132,15 @@ export default function StasDebugPanel() {
   const [resyncError, setResyncError] = useState<string | null>(null)
   const resyncFileInputRef = React.useRef<HTMLInputElement>(null)
 
+  // Backfill state.
+  const [backfillBusy, setBackfillBusy] = useState(false)
+  const [backfillResult, setBackfillResult] = useState<{
+    processed: number
+    updated: number
+    errors: number
+    notes: string[]
+  } | null>(null)
+
   // Load (or refresh) the list of STAS in the wallet's basket.
   const loadStas = React.useCallback(async () => {
     if (!stas?.keyDeriver) return
@@ -215,6 +224,75 @@ export default function StasDebugPanel() {
       setByTxidError(e instanceof Error ? e.message : String(e))
     } finally {
       setRegistering(false)
+    }
+  }
+
+  // Backfill: re-derive tokenId + symbol for every owned STAS UTXO.
+  // For rows registered before findCreateContractTxid existed (or before
+  // parseClassicStasMetadata started extracting symbol), this updates them
+  // in-place so the Assets page groups collapse correctly.
+  const handleBackfill = async () => {
+    if (!stas?.keyDeriver || !wallet) return
+    const identityKey = stas.keyDeriver.identityKey
+    const chain = stas.keyDeriver.chain
+    setBackfillBusy(true)
+    setBackfillResult(null)
+    try {
+      const outputs: any[] =
+        (await stasQuery(identityKey, chain, 'listStasOutputs', [])) ?? []
+      let processed = 0
+      let updated = 0
+      let errors = 0
+      const notes: string[] = []
+      const { parseClassicStasMetadata } = await import(
+        '../../services/stas/parseClassicStasMetadata'
+      )
+      const { findCreateContractTxid } = await import(
+        '../../services/stas/findCreateContractTxid'
+      )
+      for (const o of outputs) {
+        processed++
+        try {
+          if (!o.lockingScript || !o.outputId) continue
+          const meta = parseClassicStasMetadata(o.lockingScript)
+          if (!meta) {
+            notes.push(`${o.txid?.substring(0, 12)}…:${o.vout} — not classic STAS`)
+            continue
+          }
+          const cc = await findCreateContractTxid({
+            wallet,
+            txid: o.txid,
+          })
+          if (!cc.tokenId) {
+            notes.push(
+              `${o.txid?.substring(0, 12)}…:${o.vout} — no CreateContract` +
+                (cc.reason ? `: ${cc.reason}` : '')
+            )
+            continue
+          }
+          // Skip if both fields already match.
+          if (o.tokenId === cc.tokenId) continue
+          await stasQuery(identityKey, chain, 'updateStasOutputAndToken', [
+            {
+              outputId: o.outputId,
+              tokenId: cc.tokenId,
+              symbol: meta.symbol ?? undefined,
+              flagsHex: meta.flagsHex ?? undefined,
+            },
+          ])
+          updated++
+        } catch (e) {
+          errors++
+          notes.push(
+            `${o.txid?.substring(0, 12)}…:${o.vout} — ${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+      }
+      setBackfillResult({ processed, updated, errors, notes })
+      // Refresh visible state so the panel + Assets page pick up new tokenIds.
+      loadStas()
+    } finally {
+      setBackfillBusy(false)
     }
   }
 
@@ -875,6 +953,65 @@ export default function StasDebugPanel() {
             {scanError}
           </Typography>
         )}
+
+        {/* ===== Backfill tokenIds ===== */}
+        <Divider sx={{ my: 2 }} />
+        <Box sx={{ mb: 2 }}>
+          <Typography variant='subtitle1' sx={{ fontWeight: 600 }}>
+            Backfill tokenIds
+          </Typography>
+          <Typography variant='caption' color='text.secondary' display='block' sx={{ mb: 1 }}>
+            Re-derives the CreateContract txid (canonical classic-STAS tokenId)
+            + symbol for every owned STAS UTXO. Useful after the classic-STAS
+            parser improvements landed — existing rows have empty / stale
+            tokenIds that need a one-shot update.
+          </Typography>
+          <Button
+            variant='outlined'
+            size='small'
+            onClick={handleBackfill}
+            disabled={backfillBusy || !wallet || !stas?.keyDeriver}
+          >
+            {backfillBusy ? <CircularProgress size={14} /> : 'Backfill tokenIds'}
+          </Button>
+          {backfillResult && (
+            <Box
+              sx={{
+                mt: 1,
+                p: 1.5,
+                borderRadius: 1,
+                bgcolor: backfillResult.errors > 0 ? 'warning.light' : 'success.light',
+                border: '1px solid',
+                borderColor: backfillResult.errors > 0 ? 'warning.main' : 'success.main',
+              }}
+            >
+              <Typography variant='body2' sx={{ fontWeight: 600 }}>
+                {backfillResult.updated > 0
+                  ? `✓ Updated ${backfillResult.updated} row${backfillResult.updated === 1 ? '' : 's'}`
+                  : 'No updates required'}
+              </Typography>
+              <Typography variant='caption' display='block'>
+                processed {backfillResult.processed} ·{' '}
+                {backfillResult.updated} updated ·{' '}
+                {backfillResult.errors} errors
+              </Typography>
+              {backfillResult.notes.length > 0 && (
+                <Box
+                  component='pre'
+                  sx={{
+                    fontSize: 10,
+                    m: 0,
+                    mt: 0.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {backfillResult.notes.join('\n')}
+                </Box>
+              )}
+            </Box>
+          )}
+        </Box>
 
         {/* ===== Resync verification ===== */}
         <Divider sx={{ my: 2 }} />

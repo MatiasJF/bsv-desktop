@@ -335,6 +335,48 @@ export class StasQueries {
       .update({ ...state, updatedAt: new Date().toISOString() });
   }
 
+  /**
+   * Backfill helper — assign a freshly-derived tokenId (+ symbol/flags) to
+   * an existing stas_outputs row, and upsert the matching stas_tokens row.
+   *
+   * Used by the dev panel's "Backfill tokenIds" button, which re-derives the
+   * CreateContract txid for STAS that were registered before the
+   * findCreateContractTxid helper existed (so they have empty or stale
+   * tokenId values).
+   */
+  async updateStasOutputAndToken(args: {
+    outputId: number;
+    tokenId: string;
+    symbol?: string;
+    flagsHex?: string;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.knex('stas_outputs')
+      .where({ outputId: args.outputId })
+      .update({ tokenId: args.tokenId, updatedAt: now });
+    const existing = await this.knex('stas_tokens')
+      .where({ tokenId: args.tokenId })
+      .first();
+    if (!existing) {
+      await this.knex('stas_tokens').insert({
+        tokenId: args.tokenId,
+        symbol: args.symbol ?? 'STAS',
+        name: null,
+        satoshisPerToken: 1,
+        freezeEnabled: false,
+        confiscationEnabled: false,
+        redemptionPkh: null,
+        issuerIdentityKey: null,
+        flagsHex: args.flagsHex ?? null,
+        createdAt: now,
+      });
+    } else if (args.symbol && existing.symbol !== args.symbol) {
+      await this.knex('stas_tokens')
+        .where({ tokenId: args.tokenId })
+        .update({ symbol: args.symbol });
+    }
+  }
+
   // --- receive contexts ---------------------------------------------------
 
   async listReceiveContexts(
