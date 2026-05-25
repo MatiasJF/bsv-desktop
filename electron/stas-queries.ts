@@ -343,6 +343,10 @@ export class StasQueries {
    * CreateContract txid for STAS that were registered before the
    * findCreateContractTxid helper existed (so they have empty or stale
    * tokenId values).
+   *
+   * Order matters: stas_outputs.tokenId has a FOREIGN KEY to
+   * stas_tokens.tokenId. We must insert the parent row FIRST and only then
+   * update the satellite's FK column.
    */
   async updateStasOutputAndToken(args: {
     outputId: number;
@@ -351,9 +355,8 @@ export class StasQueries {
     flagsHex?: string;
   }): Promise<void> {
     const now = new Date().toISOString();
-    await this.knex('stas_outputs')
-      .where({ outputId: args.outputId })
-      .update({ tokenId: args.tokenId, updatedAt: now });
+    // 1) Ensure the stas_tokens row exists (insert if new, update symbol if
+    //    it changed). Either way, the FK target is ready before step 2.
     const existing = await this.knex('stas_tokens')
       .where({ tokenId: args.tokenId })
       .first();
@@ -375,6 +378,10 @@ export class StasQueries {
         .where({ tokenId: args.tokenId })
         .update({ symbol: args.symbol });
     }
+    // 2) Now safely update the satellite row.
+    await this.knex('stas_outputs')
+      .where({ outputId: args.outputId })
+      .update({ tokenId: args.tokenId, updatedAt: now });
   }
 
   // --- receive contexts ---------------------------------------------------

@@ -557,7 +557,7 @@ export default function StasDebugPanel() {
                       <Button
                         size='small'
                         variant='outlined'
-                        disabled={!row.brc42KeyId || row.spendable === false || row.frozen}
+                        disabled={!row.brc42KeyId || row.spendable === false || !!row.frozen}
                         onClick={() => {
                           setSendOpenForOutput(isSendOpen ? null : rowKey)
                           setSendRecipient('')
