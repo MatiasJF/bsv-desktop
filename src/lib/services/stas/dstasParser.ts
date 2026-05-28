@@ -32,6 +32,23 @@ export interface ParsedDstas {
   flagsHex: string;
   /** Service-field byte regions, hex. */
   serviceFields: string[];
+  /**
+   * Optional-data region, hex per entry. DSTAS_SCRIPT_INVARIANTS.md §7
+   * requires byte-exact propagation onto descendant DSTAS outputs that
+   * continue the same asset leg — losing this on a transfer breaks
+   * subsequent spend validation. Required for DSTAS send.
+   */
+  optionalData: string[];
+  /**
+   * Action-data field token. For a freshly-issued or post-transfer DSTAS,
+   * this is `{ opCode: OP_0 }` (no action) or `{ opCode: OP_2 }` (frozen).
+   * Surface both shapes — `data` for non-empty action bytes,
+   * `opCode` for sentinel opcodes — so the transfer builder can echo it
+   * or substitute the neutral `OP_0` marker for a fresh transfer.
+   */
+  actionData: { data?: string; opCode?: number };
+  /** True iff the action-data marker indicates frozen state (OP_2 or 0x02 prefix). */
+  frozen: boolean;
 }
 
 /**
@@ -51,6 +68,17 @@ export function parseDstasLockingScript(scriptHex: string): ParsedDstas | null {
   const d = reader.Dstas;
   if (!d || !d.Owner || d.Owner.length !== 20) return null;
 
+  // DSTAS action-data semantics per DSTAS_LOCKING_TEMPLATE_NOTES.md:
+  //   - OP_0 (0x00)         → empty action, not frozen
+  //   - OP_2 (0x52)          → empty action, frozen
+  //   - bytes prefixed 0x02  → non-empty action, frozen
+  //   - other bytes          → non-empty action, not frozen
+  const actionDataRaw: Uint8Array | undefined = d.ActionDataRaw;
+  const actionDataOpCode: number | undefined = d.ActionDataOpCode;
+  const frozen =
+    actionDataOpCode === 0x52 ||
+    (!!actionDataRaw && actionDataRaw.length > 0 && actionDataRaw[0] === 0x02);
+
   return {
     ownerFieldHash160: toHex(d.Owner),
     tokenId: toHex(d.Redemption),
@@ -58,5 +86,10 @@ export function parseDstasLockingScript(scriptHex: string): ParsedDstas | null {
     confiscationEnabled: !!d.ConfiscationEnabled,
     flagsHex: toHex(d.Flags),
     serviceFields: (d.ServiceFields || []).map((f: any) => toHex(f)),
+    optionalData: (d.OptionalData || []).map((b: any) => toHex(b)),
+    actionData: actionDataRaw
+      ? { data: toHex(actionDataRaw) }
+      : { opCode: actionDataOpCode },
+    frozen,
   };
 }

@@ -1,11 +1,12 @@
 /**
  * DstasProtocolAdapter — STAS v3 / "DSTAS", parsed via dxs-bsv-token-sdk.
  *
- * Discovery + registration are fully supported. Transfer is intentionally
- * NOT implemented: the DSTAS engine has different unlock semantics from
- * classic STAS and the wallet doesn't yet carry the BRC-42 path for it.
- * Exposing `transferSupported: false` lets the UI surface this honestly
- * (disabled Send button with a tooltip) instead of failing mid-flow.
+ * Discovery + registration land via StasDiscoveryService's registry
+ * dispatch. Transfer goes through DstasTransferService (F3): the SDK's
+ * `buildDstasLockingScript` gives us the new output, wallet-toolbox
+ * handles funding + broadcast via createAction/signAction, and the
+ * DSTAS unlocking script is hand-assembled to match the template's
+ * expected witness format (mirror of the SDK's InputBuilder.sign).
  */
 
 import { DSTAS_BASKET } from '../../constants/baskets';
@@ -13,13 +14,18 @@ import { parseDstasLockingScript } from '../stas/dstasParser';
 import type {
   TokenProtocolAdapter,
   ParsedTokenOutput,
+  TransferArgs,
+  TransferResult,
 } from './TokenProtocolAdapter';
+import type { DstasTransferService } from './dstas/DstasTransferService';
 
 export class DstasProtocolAdapter implements TokenProtocolAdapter {
   readonly id = 'dstas' as const;
   readonly basketName = DSTAS_BASKET;
   readonly displayName = 'DSTAS';
-  readonly transferSupported = false;
+  readonly transferSupported = true;
+
+  constructor(private readonly transferService: DstasTransferService) {}
 
   async parseOutput(scriptHex: string): Promise<ParsedTokenOutput | null> {
     const parsed = parseDstasLockingScript(scriptHex);
@@ -33,5 +39,9 @@ export class DstasProtocolAdapter implements TokenProtocolAdapter {
       confiscationEnabled: parsed.confiscationEnabled,
       serviceFields: parsed.serviceFields,
     };
+  }
+
+  async transfer(args: TransferArgs): Promise<TransferResult> {
+    return this.transferService.transfer(args);
   }
 }

@@ -56,6 +56,18 @@
       "require": "./dist/script/read/locking-script-reader.js",
       "default": "./dist/script/read/locking-script-reader.js"
     },
+    "./script/build/dstas-locking-builder": {
+      "types": "./dist/script/build/dstas-locking-builder.d.ts",
+      "import": "./dist/script/build/dstas-locking-builder.js",
+      "require": "./dist/script/build/dstas-locking-builder.js",
+      "default": "./dist/script/build/dstas-locking-builder.js"
+    },
+    "./script/eval/script-evaluator": {
+      "types": "./dist/script/eval/script-evaluator.d.ts",
+      "import": "./dist/script/eval/script-evaluator.js",
+      "require": "./dist/script/eval/script-evaluator.js",
+      "default": "./dist/script/eval/script-evaluator.js"
+    },
     "./package.json": "./package.json"
   },
   "homepage": "https://github.com/dxsapp/dxs-bsv-token-sdk",

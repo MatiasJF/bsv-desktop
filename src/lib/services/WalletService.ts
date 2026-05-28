@@ -57,6 +57,7 @@ import {
   BSV21TransferService,
   BSV21DiscoveryService,
 } from './tokens'
+import { DstasTransferService } from './tokens/dstas/DstasTransferService'
 import { StorageElectronIPC } from '../StorageElectronIPC'
 import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
@@ -566,6 +567,12 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       const stasRegistration = new StasRegistration(wallet, keyDeriver.identityKey, chain)
       const stasTransfer = new StasTransferService(wallet, keyDeriver.identityKey, chain)
 
+      // DSTAS transfer service (F3) — shares the STAS BRC-42 receive
+      // namespace, builds the new output via the SDK's pure
+      // buildDstasLockingScript, and assembles the DSTAS unlocking
+      // script byte-for-byte to match the template's witness format.
+      const dstasTransfer = new DstasTransferService(wallet, keyDeriver.identityKey, chain)
+
       // BSV-21 services — separate BRC-42 namespace, 1Sat REST indexer,
       // standard P2PKH unlock path.
       const bsv21KeyDeriver = new BSV21KeyDeriver(wallet, keyDeriver.identityKey, chain)
@@ -584,7 +591,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       // envelope last (also cheap but distinct prefix).
       const tokens = new TokenProtocolRegistry()
       tokens.register(new StasProtocolAdapter(stasTransfer))
-      tokens.register(new DstasProtocolAdapter())
+      tokens.register(new DstasProtocolAdapter(dstasTransfer))
       tokens.register(new BSV21ProtocolAdapter(bsv21Transfer))
 
       const stasDiscovery = new StasDiscoveryService({

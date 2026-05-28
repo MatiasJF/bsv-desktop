@@ -38,6 +38,14 @@ function toRichParsed(parsed: ParsedTokenOutput): ParsedDstas & { symbol?: strin
     confiscationEnabled: parsed.confiscationEnabled ?? false,
     flagsHex: parsed.flagsHex ?? '',
     serviceFields: parsed.serviceFields ?? [],
+    // DSTAS-spend prerequisite fields. The cross-protocol adapter shape
+    // doesn't carry these — registration only needs ownership/tokenId
+    // metadata — so default to empty/inert values here. The transfer
+    // path goes back through `parseDstasLockingScript` directly for the
+    // source UTXO it's about to spend.
+    optionalData: [],
+    actionData: {},
+    frozen: false,
     symbol: parsed.symbol,
   };
 }
