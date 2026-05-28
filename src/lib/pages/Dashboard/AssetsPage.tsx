@@ -286,6 +286,13 @@ export default function AssetsPage() {
 
   const [sendTarget, setSendTarget] = useState<OutputView | null>(null)
   const [sendRecipient, setSendRecipient] = useState('')
+  /**
+   * For BSV-21 only: the amount of tokens to send (raw integer string,
+   * pre-decimals). Empty string = full UTXO. STAS/DSTAS ignore this and
+   * always send the whole UTXO (their transfer engines aren't change-aware
+   * at this layer).
+   */
+  const [sendBsv21Amount, setSendBsv21Amount] = useState('')
   const [sending, setSending] = useState(false)
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
 
@@ -482,6 +489,9 @@ export default function AssetsPage() {
   const openSend = (o: OutputView) => {
     setSendTarget(o)
     setSendRecipient('')
+    // Pre-fill BSV-21 amount with the full UTXO so the default behavior
+    // matches the pre-F4 "send everything" UX. User can edit down.
+    setSendBsv21Amount(o.protocol === 'bsv-21' ? o.tokenAmount : '')
     setSendResult(null)
   }
 
@@ -512,14 +522,39 @@ export default function AssetsPage() {
       }
       let args: any = baseArgs
       if (sendTarget.protocol === 'bsv-21') {
-        // For BSV-21, the send dialog's amount input is the FULL UTXO
-        // amount today — partial-amount UI is out of scope for the
-        // scaffold. We pass the whole input through; transfer service
-        // will produce no token-change output.
+        // BSV-21 amount is a raw bigint string; validated here at the UI
+        // boundary so the transfer service can trust its input.
+        const raw = sendBsv21Amount.trim() || sendTarget.tokenAmount
+        if (!/^\d+$/.test(raw)) {
+          setSendResult({ ok: false, message: 'Amount must be a non-negative integer (raw token units).' })
+          setSending(false)
+          return
+        }
+        let sendAmtBig: bigint
+        let sourceAmtBig: bigint
+        try {
+          sendAmtBig = BigInt(raw)
+          sourceAmtBig = BigInt(sendTarget.tokenAmount)
+        } catch {
+          setSendResult({ ok: false, message: 'Could not parse amount as a bigint.' })
+          setSending(false)
+          return
+        }
+        if (sendAmtBig <= 0n) {
+          setSendResult({ ok: false, message: 'Amount must be > 0.' })
+          setSending(false)
+          return
+        }
+        if (sendAmtBig > sourceAmtBig) {
+          setSendResult({ ok: false, message: `Amount exceeds UTXO balance (${formatTokenAmount(sendTarget.tokenAmount, sendTarget.decimals)}).` })
+          setSending(false)
+          return
+        }
+        // BSV21TransferService builds a token-change output when sendAmt < sourceAmt.
         const extras: Bsv21SendExtras = {
           tokenId: sendTarget.tokenId,
           sourceAmt: sendTarget.tokenAmount,
-          amount: sendTarget.tokenAmount,
+          amount: sendAmtBig.toString(),
           dec: sendTarget.decimals || undefined,
           sym: sendTarget.symbol ?? undefined,
           icon: sendTarget.icon ?? undefined,
@@ -1062,9 +1097,31 @@ export default function AssetsPage() {
                 disabled={sending}
                 autoFocus
               />
+              {sendTarget.protocol === 'bsv-21' && (
+                <Box>
+                  <TextField
+                    label={`Amount (raw, max ${sendTarget.tokenAmount})`}
+                    value={sendBsv21Amount}
+                    onChange={(e) => setSendBsv21Amount(e.target.value)}
+                    fullWidth
+                    placeholder={sendTarget.tokenAmount}
+                    disabled={sending}
+                    helperText={
+                      sendBsv21Amount && /^\d+$/.test(sendBsv21Amount)
+                        ? `≈ ${formatTokenAmount(sendBsv21Amount, sendTarget.decimals)} ${sendTarget.symbol ?? ''}${
+                            BigInt(sendBsv21Amount) < BigInt(sendTarget.tokenAmount)
+                              ? ` · change ${formatTokenAmount((BigInt(sendTarget.tokenAmount) - BigInt(sendBsv21Amount)).toString(), sendTarget.decimals)} ${sendTarget.symbol ?? ''}`
+                              : ''
+                          }`
+                        : 'Raw token units (integer). Leave blank to send the whole UTXO.'
+                    }
+                  />
+                </Box>
+              )}
               <Typography variant='caption' color='text.secondary'>
                 The wallet covers BSV fee automatically. After broadcast, the recipient
-                wallet picks up the STAS via auto-scan (or via the /stas/register-by-txid API).
+                wallet picks up the UTXO via the indexer-driven scan on its next Refresh
+                (or via the demo /…/register-by-txid fast-path when colocated).
               </Typography>
               {sendResult && (
                 <Typography
