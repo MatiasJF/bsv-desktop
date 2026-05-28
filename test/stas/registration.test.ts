@@ -89,7 +89,12 @@ describe('StasRegistration.register', () => {
     expect(args.outputs[0].outputIndex).toBe(0)
     expect(args.outputs[0].protocol).toBe('basket insertion')
     expect(args.outputs[0].insertionRemittance.basket).toBe('stas-tokens')
-    expect(args.outputs[0].insertionRemittance.tags).toContain('dstas')
+    // Multi-protocol PR: tags now reflect the actual protocol id rather
+    // than the legacy 'dstas' string the original wallet hardcoded for
+    // every STAS-family output. With no `protocol` arg supplied, the
+    // default protocol is STAS (id: 'stas'). DSTAS rows in the new
+    // dstas-tokens basket carry the 'dstas' tag instead.
+    expect(args.outputs[0].insertionRemittance.tags).toContain('stas')
 
     // AtomicBEEF prefix (BRC-95) is 0x01010101 followed by the txid bytes.
     const txBytes = Array.from(args.tx as number[])

@@ -16,10 +16,29 @@ import {
 } from 'dxs-bsv-token-sdk/bsv'
 import { StasKeyDeriver } from '../../src/lib/services/stas/StasKeyDeriver'
 import { StasDiscoveryService } from '../../src/lib/services/stas/StasDiscoveryService'
+import {
+  TokenProtocolRegistry,
+  StasProtocolAdapter,
+  DstasProtocolAdapter,
+} from '../../src/lib/services/tokens'
 
 function mkDeriver(): StasKeyDeriver {
   const wallet = new ProtoWallet(PrivateKey.fromRandom())
   return new StasKeyDeriver(wallet as any, 'test-identity', 'main')
+}
+
+/**
+ * Test-only registry — the discovery scan dispatches via `registry.find()`
+ * after the multi-protocol refactor. Production wires this in WalletService;
+ * tests pass a minimal one with parse-only adapters (no transfer service).
+ */
+function mkRegistry(): TokenProtocolRegistry {
+  const r = new TokenProtocolRegistry()
+  // StasProtocolAdapter only needs a transfer service for its `.transfer()`
+  // method — `parseOutput` doesn't touch it. Cast `null` through `any`.
+  r.register(new StasProtocolAdapter(null as any))
+  r.register(new DstasProtocolAdapter())
+  return r
 }
 
 function makeDstasTxFor(ownerFieldHash160Hex: string) {
@@ -51,7 +70,7 @@ describe('StasDiscoveryService.scan', () => {
     }
     const registration: any = { register: async () => ({ registered: false, txid: 'x', vout: 0 }) }
     const wallet: any = { getServices: () => ({ getRawTx: async () => ({ rawTx: [0] }) }) }
-    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 5 })
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, registry: mkRegistry(), gapLimit: 5 })
 
     const result = await svc.scan()
     expect(result.scannedAddresses).toBeGreaterThanOrEqual(5)
@@ -89,7 +108,7 @@ describe('StasDiscoveryService.scan', () => {
           id === txid ? { rawTx } : { error: { message: 'not found' } },
       }),
     }
-    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 5 })
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, registry: mkRegistry(), gapLimit: 5 })
 
     const result = await svc.scan()
     expect(result.dstas).toBe(1)
@@ -133,7 +152,7 @@ describe('StasDiscoveryService.scan', () => {
         getRawTx: async () => ({ rawTx }),
       }),
     }
-    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 5 })
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, registry: mkRegistry(), gapLimit: 5 })
 
     const result = await svc.scan()
     expect(result.dstas).toBe(1)
@@ -155,7 +174,7 @@ describe('StasDiscoveryService.scan', () => {
     const registration: any = { register: async () => ({ registered: false }) }
     const wallet: any = { getServices: () => ({ getRawTx: async () => ({ rawTx: [0] }) }) }
     // Caller asks for a large gap, but hwm=0 should cap the actual scan range.
-    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 100 })
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, registry: mkRegistry(), gapLimit: 100 })
     await svc.scan()
     expect(addressesSeen).toBe(5)
   })
@@ -194,7 +213,7 @@ describe('StasDiscoveryService.scan', () => {
         getRawTx: async () => ({ rawTx }),
       }),
     }
-    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, gapLimit: 5 })
+    const svc = new StasDiscoveryService({ deriver, indexer, registration, wallet, registry: mkRegistry(), gapLimit: 5 })
 
     const result = await svc.scan()
     // Parses as DSTAS, but the owner field is not in our derived set.
