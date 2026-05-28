@@ -230,4 +230,35 @@ export class OneSatIndexerClient {
   static underscoreToDot(outpoint: string): string {
     return outpoint.replace('_', '.');
   }
+
+  /**
+   * POST /1sat/tx — submit a signed transaction so the overlay's BSV-21
+   * topic-manager indexes it.
+   *
+   * This is the load-bearing step for organic discovery on the receiving
+   * side: the public 1sat overlay doesn't auto-follow the chain for BSV-21
+   * inscriptions, so a tx broadcast via WoC / mAPI / ARC alone is invisible
+   * to the overlay's per-address sync. Routing the same bytes through
+   * /1sat/tx after the primary broadcast registers the tx with the topic-
+   * manager. This is what yours-wallet's @1sat/client does internally on
+   * every send and what the demo faucet does after every BSV-21 mint.
+   *
+   * Best-effort by convention — callers should NOT fail their flow on a
+   * non-OK response here. The tx is already on-chain via the primary
+   * broadcast; this only adds the indexer entry.
+   */
+  async submitTransaction(rawTx: number[] | Uint8Array): Promise<{
+    ok: boolean;
+    status: number;
+    body: string;
+  }> {
+    const bytes = rawTx instanceof Uint8Array ? rawTx : new Uint8Array(rawTx);
+    const r = await fetch(`${this.baseUrl}/1sat/tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: bytes,
+    });
+    const body = await r.text();
+    return { ok: r.ok, status: r.status, body };
+  }
 }

@@ -323,6 +323,45 @@ export class BSV21TransferService {
       };
     }
 
+    // 11. Indexer-coupling step: submit the signed tx to the 1Sat-Stack's
+    //     /1sat/tx endpoint so the overlay's BSV-21 topic-manager indexes
+    //     this transfer. Without this, the public 1sat overlay never
+    //     learns about our broadcast and the per-address sync at both
+    //     ends (sender's wallet and recipient's wallet) returns nothing
+    //     until the chain follower catches up (which we observed isn't
+    //     happening in any reasonable timeframe for self-broadcast txs).
+    //
+    //     This is the same /1sat/tx path the faucet's mint-bsv21.mjs
+    //     calls after WoC broadcast, and the same path yours-wallet's
+    //     @1sat/client uses internally. Belt-and-suspenders: wallet-
+    //     toolbox already broadcast the tx through its configured ARC;
+    //     this extra POST only adds the overlay's index entry.
+    //
+    //     Best-effort: a failure here doesn't fail the transfer (the
+    //     tx is already broadcast). We log and return ok=true so the
+    //     UI can show success — the user's wallet will surface the
+    //     spent UTXO via the dex-shell's register-by-txid fast-path
+    //     even if the overlay never sees this tx.
+    try {
+      const signedTxid: string | undefined = signResp?.txid;
+      if (signedTxid) {
+        const rawTxRes: any = await (this.deps.wallet as any).getServices?.()?.getRawTx?.(signedTxid);
+        const rawTxBytes: number[] | undefined = rawTxRes?.rawTx;
+        if (rawTxBytes && rawTxBytes.length > 0) {
+          const submit = await this.deps.indexer.submitTransaction(rawTxBytes);
+          if (submit.ok) {
+            console.log(`[bsv-21 transfer] overlay submit ✓ ${submit.body.slice(0, 200)}`);
+          } else {
+            console.warn(`[bsv-21 transfer] overlay submit ${submit.status}: ${submit.body.slice(0, 200)}`);
+          }
+        } else {
+          console.warn('[bsv-21 transfer] overlay submit skipped — getRawTx returned empty');
+        }
+      }
+    } catch (err) {
+      console.warn(`[bsv-21 transfer] overlay submit threw: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return { ok: true, txid: signResp?.txid };
   }
 }
