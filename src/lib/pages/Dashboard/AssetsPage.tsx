@@ -357,6 +357,11 @@ export default function AssetsPage() {
           const res: any = await wallet.listOutputs({
             basket: BSV21_BASKET,
             includeTags: true,
+            // includeCustomInstructions is load-bearing: bsv21RowToView reads
+            // brc42KeyId / ownerAddress out of customInstructions, and the
+            // Send button gate disables on `!brc42KeyId`. Without this flag
+            // every BSV-21 row renders unsendable.
+            includeCustomInstructions: true,
             include: 'locking scripts',
             limit: 10000,
           } as any)

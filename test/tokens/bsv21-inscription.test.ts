@@ -90,6 +90,61 @@ describe('buildBsv21Transfer / parseBsv21LockingScript round-trip', () => {
     })
     expect(a).toBe(b)
   })
+
+  test('JSON payload encodes dec as a string, not a number', () => {
+    // The 1sat-stack go-templates/bsv21 decoder unmarshals the inscription
+    // body into map[string]string — a numeric `dec` (`"dec":6`) breaks the
+    // unmarshal and the topic-manager silently rejects the output. The
+    // canonical form is `"dec":"6"`. This test locks in the fix.
+    const hex = buildBsv21Transfer({
+      payload: { id: 'x_0', amt: '42', dec: 6 },
+      ownerHash160: OWNER_HASH160,
+    })
+    // Find the JSON payload bytes inside the inscription envelope and
+    // assert the substring `"dec":"6"` is present (string form), not
+    // `"dec":6` (number form).
+    expect(hex).toContain(
+      Buffer.from('"dec":"6"', 'utf8').toString('hex'),
+    )
+    expect(hex).not.toContain(
+      Buffer.from('"dec":6,', 'utf8').toString('hex'),
+    )
+  })
+
+  test('JSON payload encodes content-type tag as OP_1 (0x51), not 0101', () => {
+    // 1sat-stack's go-templates/bsv21 + JungleBus auto-pickup both require
+    // canonical minimal-push encoding for the ord content-type tag. The
+    // non-minimal `01 01` form caused our outputs to be skipped entirely.
+    const hex = buildBsv21Transfer({
+      payload: { id: 'abc_0', amt: '1' },
+      ownerHash160: OWNER_HASH160,
+    })
+    // The 'ord' push (`036f7264`) is immediately followed by the content-
+    // type tag. Canonical form: `036f7264 51 12...` (OP_1, then push of
+    // 18-byte "application/bsv-20"). Legacy non-canonical: `036f7264 0101 12...`.
+    expect(hex).toContain('036f72645112')
+    expect(hex).not.toContain('036f7264010112')
+  })
+
+  test('builder embeds the id verbatim — caller must pass underscore form', () => {
+    // Per BSV-21 spec, the transfer inscription's `id` field is
+    // `<txid>_<vout>` (UNDERSCORE), not the dot form used for outpoints.
+    // The builder doesn't normalize — it embeds whatever the caller
+    // passes. BSV21TransferService is the canonical normalization point;
+    // this test documents the contract.
+    const underscoreId = 'deadbeef_0'
+    const hex = buildBsv21Transfer({
+      payload: { id: underscoreId, amt: '1' },
+      ownerHash160: OWNER_HASH160,
+    })
+    // The id appears in the JSON payload as `"id":"deadbeef_0"`.
+    const jsonFragment = Buffer.from(`"id":"${underscoreId}"`, 'utf8').toString('hex')
+    expect(hex).toContain(jsonFragment)
+    // And the dot form would be wrong — assert it's absent.
+    expect(hex).not.toContain(
+      Buffer.from('"id":"deadbeef.0"', 'utf8').toString('hex'),
+    )
+  })
 })
 
 describe('parseBsv21LockingScript rejection cases', () => {

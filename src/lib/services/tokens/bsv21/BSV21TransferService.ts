@@ -110,21 +110,46 @@ export class BSV21TransferService {
     }
     const changeAmt = inAmt - sendAmt;
 
-    // 2. Optional origin verification — fail closed.
-    if (originVerify) {
+    // 2. Optional origin verification — fail closed where we can,
+    //    short-circuit where we can't.
+    //
+    //    Three branches:
+    //    a) Source IS the deploy+mint output itself (first transfer from
+    //       the root). It's canonical by construction — no validation
+    //       needed. Token id encodes the deploy outpoint as `<txid>_<vout>`.
+    //    b) Overlay returns `null` for the validate-outputs call. This
+    //       happens when the per-token topic-manager (`tm_{tokenId}`)
+    //       isn't active (1sat-stack fee-gate). We can't verify, but
+    //       can't fail closed either — log a warning and proceed.
+    //    c) Overlay returns an array. Standard path — outpoint must be
+    //       in the validated set or we refuse.
+    const sourceOutpointUnderscored = OneSatIndexerClient.dotToUnderscore(
+      `${source.txid}.${source.vout}`
+    );
+    const isDeployRoot = sourceOutpointUnderscored === source.tokenId;
+    if (originVerify && !isDeployRoot) {
+      let valid: Set<string> | null;
       try {
-        const valid = await indexer.validateOutputs(source.tokenId, [
-          OneSatIndexerClient.dotToUnderscore(`${source.txid}.${source.vout}`),
+        valid = await indexer.validateOutputs(source.tokenId, [
+          sourceOutpointUnderscored,
         ]);
-        if (!valid.has(OneSatIndexerClient.dotToUnderscore(`${source.txid}.${source.vout}`))) {
-          return {
-            ok: false,
-            reason: 'Selected UTXO failed origin verification — its inscription chain may not trace back to the canonical deploy.',
-          };
-        }
       } catch (err) {
-        // Overlay unreachable. Surface but allow the user to retry with originVerify=false.
         return { ok: false, reason: `origin overlay unreachable: ${errMsg(err)}` };
+      }
+      if (valid === null) {
+        // Per-token validation unavailable. Most common cause: token's
+        // per-token worker isn't active yet (overlay returns 200 + null
+        // body). Log and proceed — the recipient's wallet still trusts
+        // the inscription bytes for ownership; the worst case is they
+        // can't see a token-scoped balance until activation.
+        console.warn(
+          `[bsv-21 transfer] origin validate unavailable for ${source.tokenId} — proceeding without ancestry check`
+        );
+      } else if (!valid.has(sourceOutpointUnderscored)) {
+        return {
+          ok: false,
+          reason: 'Selected UTXO failed origin verification — its inscription chain may not trace back to the canonical deploy.',
+        };
       }
     }
 
@@ -154,9 +179,17 @@ export class BSV21TransferService {
     }
 
     // 4. Build the two BSV-21 outputs. Both are 1 sat.
+    //
+    // Normalize tokenId to underscore form per BSV-21 spec. Historical
+    // registration paths in this wallet sometimes wrote the dot form (the
+    // overlay surfaces outpoints as `txid.vout`); the inscription's `id`
+    // field MUST be `txid_vout` or the topic-manager rejects the transfer.
+    // Normalising at the boundary makes the on-chain bytes correct
+    // regardless of how the source was stored.
+    const canonicalTokenId = source.tokenId.replace('.', '_');
     const destScriptHex = buildBsv21Transfer({
       payload: {
-        id: source.tokenId,
+        id: canonicalTokenId,
         amt: sendAmt.toString(),
         dec: source.dec,
         sym: source.sym,
@@ -168,7 +201,7 @@ export class BSV21TransferService {
     if (changeAmt > 0n && changeHash160Hex) {
       changeScriptHex = buildBsv21Transfer({
         payload: {
-          id: source.tokenId,
+          id: canonicalTokenId,
           amt: changeAmt.toString(),
           dec: source.dec,
           sym: source.sym,
@@ -323,40 +356,36 @@ export class BSV21TransferService {
       };
     }
 
-    // 11. Indexer-coupling step: submit the signed tx to the 1Sat-Stack's
-    //     /1sat/tx endpoint so the overlay's BSV-21 topic-manager indexes
-    //     this transfer. Without this, the public 1sat overlay never
-    //     learns about our broadcast and the per-address sync at both
-    //     ends (sender's wallet and recipient's wallet) returns nothing
-    //     until the chain follower catches up (which we observed isn't
-    //     happening in any reasonable timeframe for self-broadcast txs).
+    // 11. Indexer-coupling step: submit the AtomicBEEF to the overlay's
+    //     `/1sat/bsv21/overlay/submit` endpoint with the per-token topic
+    //     (`tm_<tokenId>`) so the BSV-21 topic-manager admits the transfer
+    //     and surfaces it via `/1sat/owner/.../txos`. This is what
+    //     yours-wallet's @1sat/client OverlayClient.submitBsv21 does and
+    //     what makes organic-receive work for the recipient side.
     //
-    //     This is the same /1sat/tx path the faucet's mint-bsv21.mjs
-    //     calls after WoC broadcast, and the same path yours-wallet's
-    //     @1sat/client uses internally. Belt-and-suspenders: wallet-
-    //     toolbox already broadcast the tx through its configured ARC;
-    //     this extra POST only adds the overlay's index entry.
+    //     We pass `signResp.tx` (the signed AtomicBEEF) — not raw bytes,
+    //     not refetched-via-getRawTx. The AtomicBEEF includes parent
+    //     funding transactions with their merkle proofs, which is what
+    //     the topic-manager needs to validate the chain.
     //
-    //     Best-effort: a failure here doesn't fail the transfer (the
-    //     tx is already broadcast). We log and return ok=true so the
-    //     UI can show success — the user's wallet will surface the
-    //     spent UTXO via the dex-shell's register-by-txid fast-path
-    //     even if the overlay never sees this tx.
+    //     Best-effort: a failure here doesn't fail the transfer. The tx
+    //     is already broadcast through wallet-toolbox's primary path; the
+    //     overlay submit only adds the indexer entry. If it fails today,
+    //     the tx becomes discoverable when JungleBus auto-pickup catches
+    //     up (also requires canonical inscription format — see inscription.ts).
     try {
-      const signedTxid: string | undefined = signResp?.txid;
-      if (signedTxid) {
-        const rawTxRes: any = await (this.deps.wallet as any).getServices?.()?.getRawTx?.(signedTxid);
-        const rawTxBytes: number[] | undefined = rawTxRes?.rawTx;
-        if (rawTxBytes && rawTxBytes.length > 0) {
-          const submit = await this.deps.indexer.submitTransaction(rawTxBytes);
-          if (submit.ok) {
-            console.log(`[bsv-21 transfer] overlay submit ✓ ${submit.body.slice(0, 200)}`);
-          } else {
-            console.warn(`[bsv-21 transfer] overlay submit ${submit.status}: ${submit.body.slice(0, 200)}`);
-          }
+      const signedBeef: number[] | undefined = signResp?.tx;
+      if (signedBeef && signedBeef.length > 0) {
+        const submit = await this.deps.indexer.submitTransaction(signedBeef, {
+          tokenId: source.tokenId,
+        });
+        if (submit.ok) {
+          console.log(`[bsv-21 transfer] overlay submit ✓ ${submit.body.slice(0, 200)}`);
         } else {
-          console.warn('[bsv-21 transfer] overlay submit skipped — getRawTx returned empty');
+          console.warn(`[bsv-21 transfer] overlay submit ${submit.status}: ${submit.body.slice(0, 200)}`);
         }
+      } else {
+        console.warn('[bsv-21 transfer] overlay submit skipped — signResp.tx empty (returnTXIDOnly?)');
       }
     } catch (err) {
       console.warn(`[bsv-21 transfer] overlay submit threw: ${err instanceof Error ? err.message : String(err)}`);

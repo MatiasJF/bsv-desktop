@@ -6,8 +6,9 @@
  * canonical deploy (origin-verification before send).
  *
  * Endpoint patterns mirror @1sat/wallet-toolbox's `Bsv21Client` /
- * `OwnerClient` so future protocol changes show up on a single, shared
- * surface — adjust paths here when the upstream toolkit moves.
+ * `OwnerClient` / `OverlayClient` so future protocol changes show up on
+ * a single, shared surface — adjust paths here when the upstream toolkit
+ * moves.
  *
  *   Base:                    https://api.1sat.app
  *   Token detail:            GET  /1sat/bsv21/{tokenId}
@@ -17,6 +18,9 @@
  *   Validate outpoints:      POST /1sat/bsv21/{tokenId}/outputs?unspent=true
  *                            body: ["txid_vout", …]
  *   Owner txos (any token):  GET  /1sat/owner/{address}/txos?unspent=true
+ *   Overlay submit (BSV-21): POST /1sat/bsv21/overlay/submit
+ *                            header: X-Topics: tm_bsv21 | tm_<tokenId>
+ *                            body: BEEF bytes
  *
  * Outpoint shape is `txid_vout` (underscore), matching the 1Sat overlay.
  * Callers that use `txid.vout` (the rest of this wallet) must convert.
@@ -71,6 +75,20 @@ export interface OneSatIndexerOptions {
   chain?: 'main' | 'test';
   /** Lock-type path segment. Default 'p2pkh'. */
   lockType?: string;
+}
+
+/**
+ * Result of a `/1sat/bsv21/overlay/submit` call. Wraps the raw response so
+ * callers can log on failure but proceed — the wallet has already
+ * broadcast through ARC; the overlay submit is the indexer-coupling step.
+ */
+export interface OverlaySubmitResult {
+  ok: boolean;
+  status: number;
+  /** Server-returned body, truncated by the caller as needed. */
+  body: string;
+  /** Parsed STEAK response on 200, when present. */
+  steak?: unknown;
 }
 
 export class OneSatIndexerClient {
@@ -206,19 +224,42 @@ export class OneSatIndexerClient {
   /**
    * POST /1sat/bsv21/{id}/outputs?unspent=true — origin-validate a batch
    * of outpoints. Returns the subset the overlay considers a valid part
-   * of the token's ancestry DAG. Caller treats anything missing as
-   * unverified and surfaces a warning to the user.
+   * of the token's ancestry DAG.
+   *
+   * Tri-state return:
+   *   - `Set<string>` (possibly empty): overlay responded with an array;
+   *     each element is a known-valid outpoint
+   *   - `null`: overlay returned a `null` body (status 200 with `null` JSON,
+   *     which happens for tokens whose per-token topic-manager isn't
+   *     active — the 1sat-stack fee-gate keeps `tm_{tokenId}` workers off
+   *     until the issuer funds the fee_address). Caller should treat this
+   *     as "validation unavailable", not "validation failed".
+   *
+   * The fetch is wrapped in try/catch so callers don't have to — network
+   * errors also surface as `null`.
    */
-  async validateOutputs(tokenId: string, outpoints: string[]): Promise<Set<string>> {
+  async validateOutputs(tokenId: string, outpoints: string[]): Promise<Set<string> | null> {
     if (outpoints.length === 0) return new Set();
     const url = `${this.baseUrl}/1sat/bsv21/${encodeURIComponent(tokenId)}/outputs?unspent=true`;
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(outpoints),
-    });
-    if (!r.ok) return new Set();
-    const validated = (await r.json()) as IndexedOutput[];
+    let r: Response;
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(outpoints),
+      });
+    } catch {
+      return null; // network error → "unavailable"
+    }
+    if (!r.ok) return null;
+    let validated: IndexedOutput[] | null;
+    try {
+      validated = (await r.json()) as IndexedOutput[] | null;
+    } catch {
+      return null;
+    }
+    if (validated === null || validated === undefined) return null;
+    if (!Array.isArray(validated)) return null;
     return new Set(validated.map((v) => v.outpoint));
   }
 
@@ -232,33 +273,66 @@ export class OneSatIndexerClient {
   }
 
   /**
-   * POST /1sat/tx — submit a signed transaction so the overlay's BSV-21
-   * topic-manager indexes it.
+   * POST /1sat/bsv21/overlay/submit — feed a BSV-21 transaction into the
+   * overlay's topic-manager.
    *
-   * This is the load-bearing step for organic discovery on the receiving
-   * side: the public 1sat overlay doesn't auto-follow the chain for BSV-21
-   * inscriptions, so a tx broadcast via WoC / mAPI / ARC alone is invisible
-   * to the overlay's per-address sync. Routing the same bytes through
-   * /1sat/tx after the primary broadcast registers the tx with the topic-
-   * manager. This is what yours-wallet's @1sat/client does internally on
-   * every send and what the demo faucet does after every BSV-21 mint.
+   * This is the load-bearing step for organic-receive on the recipient
+   * side. The overlay's BSV-21 topic-manager (mounted on the public
+   * `api.1sat.app` at `/1sat/bsv21/overlay/submit`) accepts BEEF-encoded
+   * transactions plus an `X-Topics` header listing the topics to consider
+   * admission to. Once admitted, the new outputs surface in:
+   *   - `GET /1sat/bsv21/{tokenId}`             (token detail)
+   *   - `GET /1sat/owner/{addr}/txos`           (per-owner sync, what our
+   *                                              discovery scan consumes)
+   *   - `GET /1sat/bsv21/{tokenId}/p2pkh/{addr}/unspent`
+   *
+   * Topics:
+   *   - `tm_bsv21` — discovery topic. Use for deploy+mint / deploy+auth
+   *     so the topic-manager registers the token AND triggers per-token
+   *     worker creation downstream. Pass `{ tokenId: undefined }`.
+   *   - `tm_<tokenId>` — per-token topic. Use for transfers; admission
+   *     validates the token's ancestry DAG. Pass `{ tokenId }`.
+   *
+   * Body: BEEF bytes (not raw tx). The BEEF must include parent funding
+   * transactions with their merkle proofs so the topic-manager can verify
+   * the chain. wallet-toolbox's `signAction` returns an AtomicBEEF with
+   * proven parents — pass `signResp.tx` directly.
+   *
+   * Empirical baseline (2026-05-28):
+   *   - raw tx bytes → 500 (overlay can't parse without BEEF framing)
+   *   - BEEF without merkle proofs in parents → 500
+   *   - BEEF with parent merkle proofs → 200 STEAK
    *
    * Best-effort by convention — callers should NOT fail their flow on a
-   * non-OK response here. The tx is already on-chain via the primary
-   * broadcast; this only adds the indexer entry.
+   * non-OK response. The tx is already on-chain via the primary broadcast;
+   * this only adds the indexer entry. If overlay submit fails today, the
+   * tx becomes discoverable when JungleBus's auto-pickup catches it (which
+   * also requires the inscription to be in canonical form — see the note in
+   * `inscription.ts` about `OP_1` for the content-type tag).
    */
-  async submitTransaction(rawTx: number[] | Uint8Array): Promise<{
-    ok: boolean;
-    status: number;
-    body: string;
-  }> {
-    const bytes = rawTx instanceof Uint8Array ? rawTx : new Uint8Array(rawTx);
-    const r = await fetch(`${this.baseUrl}/1sat/tx`, {
+  async submitTransaction(
+    beef: number[] | Uint8Array,
+    opts: { tokenId?: string } = {},
+  ): Promise<OverlaySubmitResult> {
+    const bytes = beef instanceof Uint8Array ? beef : new Uint8Array(beef);
+    // tm_bsv21 admits any deploy. tm_{tokenId} validates transfers against
+    // the deploy's ancestry. The SDK pattern in @1sat/client@0.0.38 is to
+    // use whichever matches the operation; we let the caller decide via
+    // opts.tokenId — undefined → discovery, defined → per-token.
+    const topic = opts.tokenId ? `tm_${opts.tokenId}` : 'tm_bsv21';
+    const r = await fetch(`${this.baseUrl}/1sat/bsv21/overlay/submit`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Topics': topic,
+      },
       body: bytes,
     });
     const body = await r.text();
-    return { ok: r.ok, status: r.status, body };
+    let steak: unknown;
+    if (r.ok) {
+      try { steak = JSON.parse(body); } catch { /* leave undefined */ }
+    }
+    return { ok: r.ok, status: r.status, body, steak };
   }
 }

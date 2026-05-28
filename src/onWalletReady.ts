@@ -1322,6 +1322,58 @@ export const onWalletReady = async (
           break;
         }
 
+        case '/bsv-21/receive-address': {
+          // Mirror of /stas/receive-address but for the BSV-21 BRC-42
+          // namespace. Why this exists: BSV-21 receives are scanned at
+          // addresses derived under the BSV-21 protocol id only — a STAS
+          // receive address won't appear in the BSV-21 discovery service's
+          // gap, so a BSV-21 sent there is silently orphaned. External
+          // apps (faucet, dex-shell) need a way to ask the wallet
+          // "give me a BSV-21 receive address" without guessing the
+          // namespace internally.
+          if (!_currentBsv21Discovery) {
+            response = {
+              request_id: req.request_id,
+              status: 503,
+              body: JSON.stringify({ error: 'BSV-21 services not ready' }),
+            };
+            break;
+          }
+          try {
+            const deriver = _currentBsv21Discovery.getDeriver?.();
+            if (!deriver) {
+              response = {
+                request_id: req.request_id,
+                status: 503,
+                body: JSON.stringify({ error: 'BSV-21 key deriver unavailable' }),
+              };
+              break;
+            }
+            const row = await deriver.createNextReceiveContext();
+            const dxs = await import('dxs-bsv-token-sdk/bsv');
+            const base58 = new (dxs as any).Address(
+              (dxs as any).fromHex(row.ownerFieldHash160)
+            ).Value as string;
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify({
+                address: base58,
+                ownerFieldHash160: row.ownerFieldHash160,
+                brc42KeyId: row.keyId,
+                keyIndex: row.keyIndex,
+              }),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
         case '/bsv-21/register-by-txid': {
           // DEMO-ONLY fast-path. The PRIMARY BSV-21 discovery mechanism
           // is `BSV21DiscoveryService.scan()` via the 1Sat overlay's

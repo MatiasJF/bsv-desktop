@@ -9,11 +9,33 @@
 The wallet went from **STAS-only** to **STAS + DSTAS + BSV-21**. A new
 `TokenProtocolAdapter` seam abstracts protocol-specific work (script parsing,
 transfer building, basket routing); the existing STAS pipeline is now a
-concrete adapter; DSTAS and BSV-21 are two more. Discovery is **indexer-driven
-on Refresh** for all three protocols — Bitails for STAS/DSTAS, the 1Sat overlay
-SSE stream for BSV-21. The demo faucet broadcasts mints via WhatsOnChain **and**
-submits to `POST /1sat/tx` so the BSV-21 topic-manager indexes each tx,
-matching the pattern yours-wallet's `@1sat/client` uses internally.
+concrete adapter; DSTAS and BSV-21 are two more.
+
+**Discovery reality (verified empirically 2026-05-28):** the three
+protocols sit in three different states:
+
+- **Classic STAS** — Bitails's STAS-aware indexer surfaces these
+  (mempool + confirmed). `StasDiscoveryService.scan()` works.
+- **DSTAS** — no public indexer. Bitails's STAS-aware matcher locks
+  onto the classic `76a914…88ac69` wrap and skips the DSTAS template
+  entirely. WoC's curated registry returns `utxos: null` for any
+  self-broadcast token. Receives flow through `/stas/register-by-txid`.
+- **BSV-21** — the 1Sat overlay DOES index BSV-21 outputs once the
+  inscription is canonical AND deploys are auto-picked-up by JungleBus.
+  But it has a three-gate validation chain (see §5 below) that our
+  inscription builder previously failed. Once fixed:
+  - **Deploys** index immediately via JungleBus → discovery topic
+    (`tm_bsv21`). `/1sat/bsv21/{tokenId}` returns full metadata.
+  - **Transfers** require the per-token topic-manager (`tm_{tokenId}`)
+    to be active — which 1sat-stack gates on the issuer funding the
+    `fee_address` (typically 1000 sats per output). Until the token is
+    "active", transfers can't be ingested by the overlay. They still
+    broadcast on-chain and the dex-shell's `/bsv-21/register-by-txid`
+    fast-path surfaces them at the recipient's colocated wallet.
+
+So all three protocols share the same architectural fallback —
+`register-by-txid` — and BSV-21 additionally gets free deploy-discovery
+via JungleBus once the inscription is canonical.
 
 Three database migrations land in this PR. No breaking changes to the BRC-100
 HTTP Apps API surface (`/stas/list`, `/stas/transfer`, etc.) — they remain
@@ -67,8 +89,10 @@ Three concrete adapters:
   `findCreateContractTxid` + `StasTransferService.transfer`.
   `transferSupported: true`. Basket: `stas-tokens`.
 - **`DstasProtocolAdapter`** — wraps `parseDstasLockingScript` from
-  `dstasParser`. `transferSupported: false` (DSTAS engine integration is a
-  separate effort). Basket: `dstas-tokens`.
+  `dstasParser` + `DstasTransferService`. `transferSupported: true` —
+  spending-type 1 (regular transfer) is supported, see `DstasTransferService`
+  + `buildDstasUnlockingScript` which mirror the SDK's
+  `input-builder.ts:91-178` byte-for-byte. Basket: `dstas-tokens`.
 - **`BSV21ProtocolAdapter`** — wraps the inline inscription parser + a
   `BSV21TransferService` using standard `createAction`/`signAction`.
   `transferSupported: true`. Basket: `bsv-21-tokens`.
@@ -109,77 +133,172 @@ all three of our protocols need the flag flipped post-internalize).
 The DSTAS basket split (0002) is the only data-mutating migration. Forward-only;
 running it on an empty wallet is a no-op other than the `ALTER TABLE` additions.
 
-### 4. Discovery model — indexer-driven, per protocol
+### 4. Discovery model — per-protocol coverage
+
+Empirically verified 2026-05-28 by minting + sending each protocol's
+tokens to wallet-derived addresses and observing what gets indexed:
 
 ```
-                  PRIMARY (Refresh button + on mount)         DEMO FAST-PATH
-                  ─────────────────────────────────────       (immediate UI feedback)
-   STAS    →   StasDiscoveryService.scan() via Bitails    +   /stas/register-by-txid
-              (auto-indexes the STAS template at owner
-               addresses)
-   DSTAS   →   StasDiscoveryService.scan() — same scanner,    (none — Refresh-only)
-              registry.find() picks the DSTAS adapter's
-              parser for matching scripts
-   BSV-21  →   BSV21DiscoveryService.scan() via the 1Sat   +   /bsv-21/register-by-txid
-              overlay's per-address SSE stream
-              (/1sat/owner/{addr}/txos?unspent=true)
+   STAS    →   StasDiscoveryService.scan() via Bitails     +  /stas/register-by-txid
+              ✓ mempool + confirmed coverage on `tokens/        (immediate UI feedback)
+              unspent` per address
+
+   DSTAS   →   *** no public indexer ***                       /stas/register-by-txid
+              (Bitails's matcher locks onto classic STAS         (THIS is the only working
+               P2PKH wrap; DSTAS template starts with a raw       receive path — same route
+               20-byte push and falls outside the scan rule)     as STAS; registry dispatch
+                                                                 picks the DSTAS adapter)
+
+   BSV-21  →   JungleBus → 1Sat overlay's BSV-21 topic-mgr  +  /bsv-21/register-by-txid
+              ✓ DEPLOYS auto-index (`/1sat/bsv21/{tokenId}`     (immediate UI feedback
+               returns metadata) AS LONG AS the inscription      + transfer fallback)
+               passes 3 validity gates (see §6).
+              ✗ TRANSFERS only index for tokens whose per-
+               token topic-manager is "active" — gated on the
+               issuer funding `fee_address` (1sat-stack's
+               commercial model). Until then, transfers
+               broadcast successfully on-chain but don't
+               surface at recipient addresses via /1sat/owner.
+               register-by-txid covers this gap for the
+               colocated demo path.
 ```
 
-The `register-by-txid` HTTP routes are **demo-only fast-paths** — they let a
-colocated mint flow (the dex-shell after a faucet mint) push the new txid to
-the wallet and get immediate UI feedback without waiting for the next Refresh.
-They mirror STAS's original pattern and bind to 127.0.0.1, not a public surface.
+**The `register-by-txid` HTTP routes bind to 127.0.0.1, not a public
+surface.** They're the universal fallback. STAS gets free indexing via
+Bitails on top. BSV-21 gets free indexing for deploys via JungleBus on
+top, plus optionally for transfers if the token is activated. DSTAS only
+has the localhost path.
+
+Why each gap exists:
+
+- **STAS via Bitails** — works because Bitails recognises the classic
+  P2PKH-wrapped STAS prefix.
+- **DSTAS** — DSTAS outputs lead with a bare 20-byte push instead of
+  the P2PKH wrap; they fall outside Bitails's scan rule. WoC's
+  `stas-tokens-beta` endpoint is a curated registry (returns
+  `utxos: null` for newly-minted tokens of either template). A
+  dedicated DSTAS indexer (self-hosted overlay, Bitails matcher
+  extension, or relay protocol) would close the gap; the wallet code
+  is structured so adding one is mechanical — implement a
+  `DstasDiscoveryService` mirroring the BSV21 one and wire it.
+- **BSV-21 transfers** — the 1sat-stack pipeline has two topic-managers
+  per BSV-21 token: `tm_bsv21` (discovery; admits deploys; auto-fed by
+  JungleBus) and `tm_<tokenId>` (per-token; admits transfers; only
+  spins up after fee activation). For demo / unfunded tokens, only
+  deploys index; transfers wait on activation. The wallet's send-flow
+  submits BEEF best-effort to `/1sat/bsv21/overlay/submit` (matching
+  `@1sat/client`'s pattern) and logs a 500 warning when the per-token
+  worker is absent — the broadcast still succeeds.
 
 ### 5. BSV-21 ord-inscription handling
 
-Output format:
+Canonical on-chain output format (verified against indexed tokens like
+`$NINJAPUNKGIRLS` and our own end-to-end test):
 
 ```
 00 63                                           OP_FALSE OP_IF
 03 6f7264                                       push "ord"
-01 01                                           push 0x01  (content-type marker)
+51                                              OP_1 (content-type tag — canonical
+                                                       minimal push, NOT `01 01`)
 12 6170706c69636174696f6e2f6273762d3230         push "application/bsv-20"
 00                                              OP_0  (separator)
 <pushdata> <json bytes>                         {"p":"bsv-20","op":"deploy+mint"|"transfer",
-                                                 "amt":"<int>","dec":<n>,"sym":"<sym>",…}
+                                                 "id":"<txid>_<vout>",  ← UNDERSCORE (transfer only)
+                                                 "amt":"<int>",         ← STRING bigint
+                                                 "dec":"<n>",           ← STRING (not number)
+                                                 "sym":"<sym>",…}
 68                                              OP_ENDIF
 76 a9 14 <20-byte pkh> 88 ac                    standard P2PKH owner script
 ```
 
+Three byte/JSON-level validity gates the 1sat-stack
+`go-templates/bsv21` decoder enforces (all three silently reject
+violators — they return nil, no error message):
+
+1. **Content-type tag must be OP_1 (0x51)**, the canonical minimal push.
+   Non-minimal `01 01` (push 1 byte of value 0x01) is rejected.
+2. **Every JSON value must be a string.** The decoder does
+   `json.Unmarshal(content, &map[string]string{})` — a numeric `"dec":10`
+   fails the unmarshal. Must be `"dec":"10"`.
+3. **Transfer `id` field must be `<txid>_<vout>` (underscore).** Dot
+   form (the convention used for outpoints elsewhere) is rejected. The
+   wallet normalizes at the boundary in `BSV21TransferService` since
+   some registration paths historically wrote the dot form into basket
+   tags.
+
+These gates apply to BOTH our direct overlay submit AND to JungleBus's
+auto-pickup. Three regression tests in `test/tokens/bsv21-inscription.test.ts`
+lock each gate in with byte-level assertions on the produced script.
+
 Implementation (no SDK dependency for the envelope):
 
 - `src/lib/services/tokens/bsv21/inscription.ts` — `buildBsv21Transfer` +
-  `parseBsv21LockingScript`. Pure, ~200 LOC.
+  `parseBsv21LockingScript`. Pure, ~200 LOC. Parser accepts both canonical
+  and legacy forms so we don't break older outputs already in baskets.
 - The trailing P2PKH means **wallet-toolbox can sign the input natively** via
   the standard sighash + the wallet's `createSignature` path. No engine, no
   custom unlock template, no `partialSTASUnlockingScript`-style trickery.
   Token id = `<txid>_<vout>` of the deploy+mint outpoint.
 
-### 6. The 1Sat overlay coupling (the load-bearing piece)
+### 6. The 1Sat overlay coupling
 
-`POST /1sat/tx` on `https://api.1sat.app` is the publicly-exposed broadcast
-endpoint that "captures BEEF locally, forwards to arcade with the stack's
-callback token, and registers the tx with the BSV-21 topic-manager" (quoted
-from `@1sat/client`'s OneSatServices source). After a successful POST, the
-overlay's per-address SSE (`/1sat/owner/{addr}/txos?unspent=true`) starts
-returning the corresponding `event: txo` payload — which is what the wallet's
-discovery consumes.
+The 1sat-stack architecture has two ingest paths and three topic-managers
+that matter for our wallet:
 
-Without this submission step, the public 1sat overlay never sees self-broadcast
-BSV-21 transactions. We confirmed by direct probe that:
+```
+                   ┌─── tm_bsv21 ─────────┐
+                   │   (discovery topic)   │
+   JungleBus  ────►│   admits deploys      ├──► /1sat/bsv21/{tokenId}
+   subscriber      │   triggers per-token  │    /1sat/owner/{addr}/txos
+                   │   worker creation     │
+                   └───────────────────────┘
+                              │
+                              │ on deploy admission +
+                              │ token activation (fee_address funded)
+                              ▼
+                   ┌─── tm_{tokenId} ─────┐
+                   │   (per-token topic)   │
+   POST            │   admits transfers    ├──► per-token balance,
+   /1sat/bsv21/   ►│   validates ancestry  │    /1sat/bsv21/{tokenId}/
+   overlay/submit  │                       │       p2pkh/{addr}/unspent
+                   └───────────────────────┘
+```
 
-- The public `api.1sat.app` is a **read-only mirror** for most surfaces —
-  `/1sat/owner/*` and `/1sat/bsv21/*` reads work, but `/1sat/arcade/*` and
-  `/1sat/overlay/*` return Express-default 404.
-- `/1sat/tx` is the one writable endpoint that **is** publicly exposed, accepts
-  raw tx bytes or AtomicBEEF, and triggers topic-manager registration.
-- yours-wallet's `@1sat/client` package broadcasts through this exact endpoint.
+**For deploys (faucet path):** broadcast hits the chain → JungleBus
+auto-picks-up → discovery topic admits → token metadata appears in
+`/1sat/bsv21/{tokenId}`. Free, automatic, no submit needed — confirmed
+empirically with our `1213` and `FB212` mints once the inscription was
+canonical. The faucet's previous `POST /1sat/tx` step was redundant;
+that endpoint is a broadcast pass-through (Arcade relay), not a
+topic-manager ingest.
 
-The faucet (`demo/stas-faucet/lib/mint-bsv21.mjs`) calls `POST /1sat/tx`
-automatically after each WoC broadcast. Any other sender who broadcasts through
-the toolbox's stack (yours-wallet, @1sat/actions consumers, etc.) does it for
-free. This is what makes organic-receive discovery actually work via the
-public indexer.
+**For transfers (wallet path):** the wallet POSTs the signed
+AtomicBEEF to `POST /1sat/bsv21/overlay/submit` with the `X-Topics:
+tm_<tokenId>` header. Matches `@1sat/client@0.0.38`'s
+`OverlayClient.submitBsv21` exactly. Returns 200 STEAK when the
+per-token worker is up; returns 500 with a generic error when it
+isn't (tokens that haven't been activated). The wallet logs and
+proceeds — the tx is broadcast separately through wallet-toolbox's
+ARC, so user value isn't blocked on overlay coupling.
+
+**Public endpoints actually exposed on `api.1sat.app`:**
+- `POST /1sat/bsv21/overlay/submit` — exists, returns 200 / 500
+  depending on per-token worker availability. (`OPTIONS` returns 405
+  Method Not Allowed; an earlier probe of `OPTIONS` misled us into
+  thinking the endpoint didn't exist.)
+- `POST /bsv21/overlay/submit` (no `/1sat/` prefix) — 404 publicly,
+  but reachable via `wallet.1sat.app/bsv21/overlay/submit` with
+  BRC-103 mutual auth. Not used by our wallet; documented for
+  future reference.
+- `POST /1sat/tx` — a public broadcast relay (returns
+  `ACCEPTED_BY_NETWORK`). Doesn't feed the topic-manager. The
+  wallet and the faucet used to hit this endpoint expecting
+  indexing; that was wrong.
+
+The faucet no longer submits to the overlay (relies on JungleBus).
+The wallet submits during sends because it has the signed BEEF on
+hand for free; the submit is best-effort with a console warning on
+failure.
 
 ### 7. AssetsPage UI
 
@@ -192,9 +311,9 @@ public indexer.
   crashing the page.
 - Group card carries a protocol-coloured chip ("STAS" filled / "DSTAS" outlined
   / "BSV-21" outlined).
-- Per-UTXO Send button is gated on `adapter.transferSupported`. DSTAS rows show
-  a disabled button with the tooltip *"Send is not yet available for DSTAS in
-  this wallet."*
+- Per-UTXO Send button is gated on `adapter.transferSupported`. All three
+  protocols now support transfer; the gate stays as a safety net for any
+  future adapter that ships with `transferSupported: false`.
 - Receive card has a STAS / BSV-21 protocol toggle; DSTAS uses STAS's BRC-42
   namespace (intentional — DSTAS receive piggybacks on the STAS deriver).
 
@@ -267,8 +386,9 @@ Was a STAS-only Mint tab. Now:
 - Hidden / shown fields per protocol (BSV-21 reveals `amt` + `dec`; STAS/DSTAS
   show `symbol/name/satoshis`).
 - After a successful mint, calls the matching wallet route:
-  - STAS → `/stas/register-by-txid`
-  - DSTAS → no auto-register (relies on Bitails + Refresh)
+  - STAS → `/stas/register-by-txid` (basket: `stas-tokens`)
+  - DSTAS → `/stas/register-by-txid` (basket: `dstas-tokens` — same route,
+    registry dispatch picks the DSTAS adapter based on template)
   - BSV-21 → `/bsv-21/register-by-txid`
 - Result panel renders one txid for BSV-21 (deploy+mint is a single tx) or two
   for STAS/DSTAS (Contract + Issue).
@@ -306,7 +426,9 @@ demo/stas-faucet/lib/
   woc.mjs                          UTXO listing + balance + broadcast
   mint-stas.mjs                    extracted from monolithic server.mjs
   mint-dstas.mjs                   new — BuildDstasIssueTxs wrapper
-  mint-bsv21.mjs                   new — inscription builder + 1Sat /1sat/tx submit
+  mint-bsv21.mjs                   new — inscription builder (canonical OP_1
+                                   content-type, string `dec`); relies on
+                                   JungleBus auto-pickup for overlay indexing
 ```
 
 Modified files (non-trivial):
@@ -334,36 +456,41 @@ demo/stas-dex-shell/public/styles.css             .mint-proto-row styling
 ## Status of the original "known limitations"
 
 The first version of this doc listed five "limitations". A later review found three
-of them were punts dressed up as constraints. Four have since been addressed:
+of them were punts dressed up as constraints. All five have since been addressed:
 
 | Item | Original state | Now |
 |---|---|---|
-| **F1 — Vite production build** | `npm run build:renderer` failed on the vendored SDK's `__exportStar` re-exports (Rollup's CJS static analyser couldn't trace them). | **Fixed.** `vite.config.ts` sets `build.commonjsOptions = { include: [/dxs-bsv-token-sdk/, /node_modules/], transformMixedEsModules: true }`. Build succeeds, ~10.5 MB bundle (gzip 2.3 MB). |
-| **F2 — Wallet transfers don't reach the overlay** | `BSV21TransferService` only broadcast through wallet-toolbox's default ARC; the 1Sat overlay never saw self-originated transfers, so the recipient's wallet never picked them up via the per-address sync. | **Fixed.** After `signAction` succeeds, the service fetches the signed raw tx via `wallet.getServices().getRawTx(txid)` and POSTs to `OneSatIndexerClient.submitTransaction(...)` (→ `https://api.1sat.app/1sat/tx`). Mirrors the faucet's pattern; matches yours-wallet's `@1sat/client`. Best-effort — failure is logged, transfer still returns `ok: true` (the primary broadcast already happened). |
-| **F3 — DSTAS send (`transferSupported: false`)** | "Out of scope" — I never investigated. | **Deliberately deferred to a focused PR.** The SDK exposes `BuildDstasBaseTx` for spends, but its `Owner` type wants raw `PrivateKey | Wallet` bytes that BRC-42 derivation doesn't surface. The `AllowPresetUnlockingScript` escape hatch needs the DSTAS template's witness format (`docs/DSTAS_LOCKING_TEMPLATE_NOTES.md`) and mandatory `evaluateTransactionHex(...)` validation per the SDK's AGENTS.md. ~half-day of careful integration; not a wrap-in-an-adapter job. |
-| **F4 — BSV-21 partial-amount send** | UI sent the full UTXO only; `BSV21TransferService` already had the change-output branch. | **Fixed.** Send dialog has an Amount field for BSV-21 with validation (`/^\d+$/`, > 0, ≤ source). Live helper shows decimal-formatted value + change amount. STAS/DSTAS unaffected. |
-| **F5 — No tests for new code** | True — only existing STAS tests ran. | **Partially addressed.** `test/tokens/bsv21-inscription.test.ts` adds 12 tests covering build / parse / round-trip / deploy+mint vs transfer / rejection edges for the inscription envelope (the load-bearing pure-function module). `npm run test:tokens` runs them. Other new modules (OneSatIndexerClient SSE, BSV21Registration, migrations) still rely on manual verification. |
-
-The historical "L4 — public 1sat overlay write paths" really is informational rather than a
-wallet limitation — `/1sat/tx` is publicly POSTable and the wallet (after F2) and the faucet
-both route through it. arcade/* and overlay/* writes aren't deployed publicly, but we don't
-need them.
+| **F1 — Vite production build** | `npm run build:renderer` failed on the vendored SDK's `__exportStar` re-exports (Rollup's CJS static analyser couldn't trace them). | **Fixed.** `vite.config.ts` sets `build.commonjsOptions = { include: [/dxs-bsv-token-sdk/, /node_modules/], transformMixedEsModules: true }`. Build succeeds. |
+| **F2 — Wallet transfers don't reach the overlay** | `BSV21TransferService` only broadcast through wallet-toolbox's default ARC. | **Fixed.** After `signAction` succeeds, the service passes `signResp.tx` (the signed AtomicBEEF) to `OneSatIndexerClient.submitTransaction(beef, { tokenId })`, which POSTs to the correct endpoint `https://api.1sat.app/1sat/bsv21/overlay/submit` with `X-Topics: tm_<tokenId>` — matching `@1sat/client@0.0.38`'s `OverlayClient.submitBsv21` exactly. Returns 200 STEAK for transfers of activated tokens; returns 500 (with console warning, non-blocking) for inactive tokens whose per-token topic-manager isn't running. Earlier this column wrongly claimed `/1sat/tx` was the canonical endpoint — it's a broadcast relay. Three inscription-validity gates also fixed (see §5). |
+| **F3 — DSTAS send** | `transferSupported: false`. | **Fixed (separate PR).** `DstasTransferService` + `buildDstasUnlockingScript` mirror the SDK's `input-builder.ts:91-178` byte-for-byte. Signature flows through `wallet.createSignature` with BRC-42 (same namespace as STAS). `evaluateTransactionHex(...)` is run pre-broadcast as a diagnostic (not a hard gate — input 1 is the BSV funding which isn't signed yet at evaluator time). DstasProtocolAdapter is now `transferSupported: true`. |
+| **F4 — BSV-21 partial-amount send** | UI sent the full UTXO only. | **Fixed.** Send dialog has an Amount field for BSV-21 with validation. |
+| **F5 — No tests for new code** | True — only existing STAS tests ran. | **Addressed.** `test/tokens/bsv21-inscription.test.ts` (15 tests, including 3 byte-level regression tests for the inscription validity gates) + `test/tokens/dstas-transfer.test.ts` (6 tests). Other new modules (OneSatIndexerClient SSE, BSV21Registration, migrations) still rely on manual verification. |
 
 ## Outstanding work
 
-Only one substantive item left:
+- **DSTAS organic-receive indexer.** Bitails doesn't match the DSTAS
+  template; receivers can't discover sent DSTAS via Refresh alone. The
+  wallet's existing `/stas/register-by-txid` route (which dispatches
+  through the protocol registry to the DSTAS adapter) is the working
+  receive path. Closing the gap requires a dedicated DSTAS indexer.
+- **BSV-21 transfer indexing for unactivated tokens.** Deploys index
+  automatically via JungleBus → discovery topic. Transfers only index
+  when the token's per-token topic-manager is active, which 1sat-stack
+  gates on the issuer funding the `fee_address` (per-token commercial
+  model). The wallet's submit logs a 500 warning and proceeds; the tx
+  is already broadcast on-chain. For demo / unfunded tokens, the
+  dex-shell's `/bsv-21/register-by-txid` fast-path covers colocated
+  receives.
 
-- **F3 — DSTAS send.** Tracked separately so it gets the focused review the SDK's
-  mandatory `evaluateTransactionHex(...)` validation requires. The adapter remains
-  `transferSupported: false` until then; the UI surfaces this honestly with a
-  disabled Send button + tooltip rather than failing mid-transfer.
+Neither gap blocks current wallet functionality for the demo /
+local-development case.
 
-Running the test suite (May 2026):
+Running the test suite:
 
 ```
-npm run test:stas      # 15 passed / 3 skipped — adapter refactor didn't regress STAS
-npm run test:tokens    # 12 passed — BSV-21 inscription round-trips
-npm run build:renderer # ✓ 14.99s, dist/assets/index-*.js  10.48 MB │ gzip 2.34 MB
+npm run test:stas      # adapter refactor didn't regress STAS
+npm run test:tokens    # BSV-21 inscription + DSTAS transfer
+npm run build:renderer # prod build succeeds
 ```
 
 ---
@@ -411,15 +538,21 @@ Manual (no test suite). The day-of-merge smoke test:
 3. **STAS regression** — mint via the dex-shell with `Classic STAS`. Auto-registers
    into `stas-tokens`. Send one UTXO to a fresh address — should be byte-identical
    to pre-PR behavior.
-4. **DSTAS** — confirm the migrated DSTAS row renders with a "DSTAS" chip + a
-   disabled Send button + tooltip.
-5. **BSV-21 mint + receive** — generate a BSV-21 receive address in the wallet
+4. **DSTAS mint + receive** — mint via the dex-shell with `DSTAS`. After mint,
+   see *"auto-registered into your dstas-tokens basket (1 output)"* in the
+   dex-shell result panel. The new row in Assets has an enabled Send button.
+   (Refresh from an unrelated wallet, by contrast, will NOT discover this
+   DSTAS — no public indexer covers the template.)
+5. **DSTAS send** — pick the DSTAS UTXO, send to a fresh address. The
+   pre-broadcast `evaluateTransactionHex` diagnostic runs (non-blocking) and
+   the tx broadcasts via wallet-toolbox.
+6. **BSV-21 mint + receive** — generate a BSV-21 receive address in the wallet
    (Receive card → BSV-21 toggle → Generate). Paste into the dex-shell's BSV-21
    Mint tab. After mint, see *"auto-registered into your bsv-21-tokens basket
    (1 output)"* in the dex-shell result panel. Refresh the wallet's Assets page
    — the same UTXO should be discovered organically by the overlay too (proves
    the indexer path works, not just the localhost shortcut).
-6. **BSV-21 input validation** — submit the dex-shell mint with `amt = "lorem"`.
+7. **BSV-21 input validation** — submit the dex-shell mint with `amt = "lorem"`.
    Faucet returns 500 with *"Invalid BSV-21 amt — must be a non-negative integer
    string"* and broadcasts nothing.
 

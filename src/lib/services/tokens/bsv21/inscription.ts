@@ -5,7 +5,7 @@
  *
  *   00 63                      OP_FALSE OP_IF
  *   03 6f 72 64                push "ord"  (3-byte length-prefixed)
- *   01 01                      push 1-byte field id (0x01 → content-type)
+ *   51                         OP_1 — content-type tag (canonical, minimal-push)
  *   12 <ct...>                 push content-type bytes (18 = "application/bsv-20")
  *   00                         OP_0 (separator before content payload)
  *   <push> <json bytes>        push the JSON payload (variable-length)
@@ -17,6 +17,14 @@
  * Field order is fixed by our builder so the produced bytes are reproducible,
  * but the parser accepts any order — the wire format is JSON, not byte-significant.
  *
+ * Why OP_1 (0x51) for the content-type tag: the canonical Ordinals envelope
+ * uses minimal-push encoding (OP_1 for single-byte value 0x01). Earlier
+ * versions of this builder emitted the non-minimal `01 01` push, which the
+ * 1sat-stack `go-templates/bsv21` decoder rejects as non-canonical — meaning
+ * neither JungleBus auto-pickup nor direct `/1sat/bsv21/overlay/submit`
+ * would index our outputs. Verified empirically 2026-05-28 against
+ * `$NINJAPUNKGIRLS` and other indexed tokens; they all use OP_1.
+ *
  * No dependency on @bopen-io/templates; this module talks bytes directly.
  */
 
@@ -25,6 +33,7 @@ import { BSV20_CONTENT_TYPE } from './constants';
 const ORD_TAG_HEX = '6f7264'; // "ord"
 const OP_FALSE_HEX = '00';
 const OP_IF_HEX = '63';
+const OP_1_HEX = '51'; // OP_1 — canonical minimal-push of value 0x01
 const OP_ENDIF_HEX = '68';
 const OP_DUP_HEX = '76';
 const OP_HASH160_HEX = 'a9';
@@ -106,20 +115,29 @@ export function buildBsv21Transfer(args: Bsv21BuildArgs): string {
   }
 
   // Construct the BSV-20 JSON. Field order is fixed for reproducible bytes.
-  const obj: Record<string, unknown> = {
+  // EVERY value must serialize as a JSON string — 1sat-stack's
+  // `go-templates/bsv21` Decode unmarshals into `map[string]string`, so a
+  // numeric `dec` (e.g. `"dec": 10`) breaks `json.Unmarshal` and the
+  // topic-manager rejects the output with no error surfacing to us.
+  // `amt` is already a stringified bigint per spec; `dec` arrives as a
+  // JS number from the basket tag, so we coerce here.
+  const obj: Record<string, string> = {
     p: 'bsv-20',
     op: 'transfer',
     id: payload.id,
     amt: payload.amt,
   };
-  if (payload.dec !== undefined) obj.dec = payload.dec;
+  if (payload.dec !== undefined) obj.dec = String(payload.dec);
   if (payload.sym !== undefined) obj.sym = payload.sym;
   if (payload.icon !== undefined) obj.icon = payload.icon;
   const jsonHex = utf8ToHex(JSON.stringify(obj));
 
   // ord envelope.
   const ordTagPush = encodePushHex(ORD_TAG_HEX); // 03 6f 72 64
-  const fieldIdContentType = encodePushHex('01'); // 01 01 → field id = 0x01 (content type)
+  // Content-type field tag: OP_1 (0x51), the canonical minimal-push of value 1.
+  // Was previously the non-minimal 01 01 form, which 1sat-stack's go-templates
+  // bsv21 decoder rejects as non-canonical.
+  const fieldIdContentType = OP_1_HEX;
   const ctPush = encodePushHex(utf8ToHex(BSV20_CONTENT_TYPE));
   const separator = '00'; // OP_0
   const contentPush = encodePushHex(jsonHex);
@@ -211,7 +229,8 @@ function hexToUtf8(hex: string): string {
  * Returns null for non-BSV-21 scripts — never throws.
  *
  * Recognises both `OP_1 (0x51)` and `push-of-0x01` for the ord field-id
- * marker, since toolboxes in the wild emit both shapes.
+ * marker, since toolboxes in the wild emit both shapes — including our own
+ * older outputs before the canonical-form fix.
  */
 export function parseBsv21LockingScript(scriptHex: string): ParsedBsv21Output | null {
   if (typeof scriptHex !== 'string' || scriptHex.length < 60) return null;
@@ -282,12 +301,22 @@ export function parseBsv21LockingScript(scriptHex: string): ParsedBsv21Output | 
   const amt: string | undefined = payload.amt;
   if (!amt) return null;
 
+  // `dec` is a string per spec ("0".."18") but we also accept a JS number
+  // for legacy outputs written before the canonical-form fix.
+  let dec: number | undefined;
+  if (typeof payload.dec === 'number' && Number.isFinite(payload.dec)) {
+    dec = payload.dec;
+  } else if (typeof payload.dec === 'string' && /^\d+$/.test(payload.dec)) {
+    const n = parseInt(payload.dec, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 18) dec = n;
+  }
+
   return {
     // Mints don't have id in the payload; the caller resolves it from the
     // outpoint at registration time.
     id: id ?? '',
     amt,
-    dec: typeof payload.dec === 'number' ? payload.dec : undefined,
+    dec,
     sym: typeof payload.sym === 'string' ? payload.sym : undefined,
     icon: typeof payload.icon === 'string' ? payload.icon : undefined,
     ownerHash160,

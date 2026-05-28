@@ -1,5 +1,5 @@
 /**
- * IndexerClient — STAS UTXO scanner.
+ * IndexerClient — classic-STAS UTXO scanner.
  *
  * Queries Bitails's STAS-aware indexer at
  *   GET https://api.bitails.io/address/{addr}/tokens/unspent
@@ -9,8 +9,16 @@
  * curated registry — it only indexes pre-registered tokens (everything in
  * its `stas_all` is a Taal/Vaionex experiment) and returns `utxos:null` for
  * newly-minted tokens like ours. Bitails auto-indexes any classic-STAS
- * output; live-tested, our `FTK` faucet token shows up immediately after
- * confirmation. Their docs: https://docs.bitails.io/#get-unspent-tokens-address
+ * output; live-tested 2026-05-28, a fresh STAS shows up immediately, even
+ * while still in mempool. Their docs:
+ * https://docs.bitails.io/#get-unspent-tokens-address
+ *
+ * Coverage caveat (verified 2026-05-28): Bitails's matcher locks onto the
+ * classic `76a914 <pkh> 88 ac 69 …` template prefix. DSTAS outputs (raw
+ * 20-byte push at the head) are NOT indexed by this endpoint — same
+ * address holding both a 0-conf classic STAS and a 3-conf DSTAS returned
+ * only the STAS. DSTAS receives must flow through `/stas/register-by-txid`
+ * until a real DSTAS indexer exists.
  *
  * Per-address UTXO fetch only. Raw transactions and merkle proofs still go
  * through `wallet.getServices()` (see `StasRegistration`); Bitails gives us
@@ -55,17 +63,21 @@ export class IndexerClient {
   constructor(private readonly baseUrl: string = BITAILS_BASE_MAINNET) {}
 
   /**
-   * STAS UTXOs at a base58 address, via Bitails's STAS indexer.
+   * Classic-STAS UTXOs at a base58 address, via Bitails's STAS indexer.
    *
-   * Bitails only surfaces *confirmed* STAS UTXOs (their indexer ingests on
-   * block, not on mempool), so we treat every returned UTXO as confirmed and
-   * stamp `height: 1` as the sentinel. The discovery loop's confirmed-only
-   * MVP gate already trusts height > 0.
+   * Bitails surfaces both mempool and confirmed STAS UTXOs (verified
+   * 2026-05-28 with a 0-confirmation mint). We stamp `height: 1` as a
+   * sentinel since the endpoint doesn't return block height; the discovery
+   * loop trusts the indexer's authoritativeness rather than gating on
+   * confirmation depth.
    *
-   * Per-address query means every UTXO returned IS owned by that address by
-   * construction — the discovery loop can trust the address mapping without
-   * re-parsing the locking script for ownership, falling back to a parser
-   * only for tokenId / metadata extraction.
+   * Per-address query means every UTXO returned IS owned by that address
+   * by construction — the discovery loop can trust the address mapping
+   * without re-parsing the locking script for ownership, falling back to
+   * a parser only for tokenId / metadata extraction.
+   *
+   * DSTAS coverage: none — this endpoint doesn't index the DSTAS template.
+   * See header comment.
    */
   async getUtxosForAddress(address: string): Promise<WocUtxo[]> {
     const res = await this.bitailsGet<{ utxos?: BitailsStasUtxo[] }>(
@@ -76,7 +88,7 @@ export class IndexerClient {
       txid: u.txid,
       vout: u.index,
       value: u.amount ?? 0,
-      height: 1, // Bitails returns only confirmed UTXOs
+      height: 1, // sentinel — Bitails doesn't return height; mempool OK
       symbol: u.symbol,
       redeemAddr: u.redeemAddr,
       scriptHex: u.script,

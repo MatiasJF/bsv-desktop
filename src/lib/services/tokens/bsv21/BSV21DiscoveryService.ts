@@ -73,6 +73,17 @@ export class BSV21DiscoveryService {
   constructor(private readonly deps: BSV21DiscoveryDeps) {}
 
   /**
+   * Expose the BSV-21 BRC-42 key deriver. Used by `/bsv-21/receive-address`
+   * so external apps can request a BSV-21-namespace receive address without
+   * needing a second wiring path. The deriver lives behind the service for
+   * dependency-injection cleanliness; this getter is the one well-defined
+   * outward escape hatch.
+   */
+  getDeriver(): BSV21KeyDeriver {
+    return this.deps.deriver;
+  }
+
+  /**
    * DEMO-ONLY fast-path: register a BSV-21 UTXO directly by txid.
    *
    * The PRIMARY discovery mechanism is `scan()` — query the 1Sat overlay's
@@ -303,7 +314,13 @@ export class BSV21DiscoveryService {
         // Prefer the parsed payload (defence) but fall back to indexer-supplied
         // fields when the parsed payload is missing them (e.g. dec on transfer
         // payloads; the spec only requires dec on deploy+mint).
-        const tokenId = parsed.id || out.id || outpointU; // mints: id IS the outpoint
+        //
+        // For deploy+mint outputs the canonical tokenId is `<txid>_<vout>`
+        // (UNDERSCORE) per BSV-21 spec. The overlay surfaces outpoints in
+        // dot form (`txid.vout`), so we cannot use `outpointU` (dot) as a
+        // fallback — that produced spec-violating transfers with
+        // `"id":"<txid>.<vout>"` which the topic-manager rejects.
+        const tokenId = parsed.id || out.id || `${txid}_${voutStr}`;
         const amt = parsed.amt;
         const dec = parsed.dec ?? out.dec;
         const sym = parsed.sym ?? out.sym;
