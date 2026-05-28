@@ -331,23 +331,40 @@ demo/stas-dex-shell/public/styles.css             .mint-proto-row styling
 
 ---
 
-## Known limitations
+## Status of the original "known limitations"
 
-Each row was verified by direct probe in May 2026 — the *"how we know"* column
-quotes the exact source-of-truth so a reader can re-confirm without re-deriving.
+The first version of this doc listed five "limitations". A later review found three
+of them were punts dressed up as constraints. Four have since been addressed:
 
-| Limitation | How we know it's real | Severity |
+| Item | Original state | Now |
 |---|---|---|
-| **DSTAS transfer not implemented** | `DstasProtocolAdapter` declares `readonly transferSupported = false` (`src/lib/services/tokens/DstasProtocolAdapter.ts:22`). Independently enforced at runtime in `StasTransferService.transfer` which inspects the source script's prefix and returns `{ ok: false, reason: "DSTAS send isn't supported by the wallet yet; pick a classic STAS UTXO." }` (`src/lib/services/stas/StasTransferService.ts:115`). The AssetsPage Send button is gated on `adapter.transferSupported` and renders as a disabled button with a tooltip. | low |
-| **BSV-21 partial-amount send not implemented** | `AssetsPage.tsx` `handleSendConfirm` always passes the full UTXO amount: `sourceAmt: sendTarget.tokenAmount, amount: sendTarget.tokenAmount`, with an explicit code comment *"partial-amount UI is out of scope for the scaffold"* (`src/lib/pages/Dashboard/AssetsPage.tsx:516-522`). `BSV21TransferService` itself already supports change splitting (it derives a fresh receive address and builds a token-change output when `totalIn > sendAmt`), so this is a UI-only gap. | medium |
-| **Vite production build fails** (`npm run build:renderer`) | Just re-ran. Error: *`"LockingScriptReader" is not exported by "vendor/dxs-bsv-token-sdk/dist/bsv.js"`* at `src/lib/services/stas/dstasParser.ts:9`. Pre-existing — `dstasParser.ts` is unchanged by this PR (`git diff HEAD -- src/lib/services/stas/dstasParser.ts` is empty). Only affects packaging/distribution builds; `npm run dev` (the actual development workflow) compiles cleanly because Vite dev is more permissive with the vendored SDK's CJS/ESM exports. | low |
-| **Public `api.1sat.app` deployment is read-mostly** | Direct probes (May 2026): `POST /1sat/arcade/{tx,policy,txs}` → HTTP 404 (Express default *"Cannot POST"*). `POST /1sat/overlay/{submit,lookup}` → HTTP 404. `OPTIONS /1sat/tx` → HTTP 405 with `Allow: POST` (verb supported). `POST /1sat/tx` with a real tx → HTTP 200 with `{txid, txStatus: "ACCEPTED_BY_NETWORK"}`. So `/1sat/tx` is the one publicly-exposed write endpoint; arcade and overlay write surfaces are not. This is a **deployment context, not a wallet limitation** — the wallet routes correctly through `/1sat/tx`, the same way yours-wallet's `@1sat/client` does. | informational |
-| **No tests added for the new code** (BSV-21 adapter, inscription parser, OneSatIndexerClient, BSV21KeyDeriver, BSV21Registration, BSV21TransferService, BSV21DiscoveryService, migrations 0002 + 0003) | `find test -name '*.test.*'` finds 7 existing test files (`onWalletReady`, `translations`, `storage-perf`, plus `test/stas/{derivation,discovery,migration,ownership,registration}.test.ts`). `git diff HEAD -- 'test/**'` is empty for the new code — no new test files added in this PR. The existing STAS test suite (`npm run test:stas`) **does pass** after the multi-protocol refactor — verified May 2026, 15 passed / 3 skipped — but the new code paths have only manual verification. | medium |
+| **F1 — Vite production build** | `npm run build:renderer` failed on the vendored SDK's `__exportStar` re-exports (Rollup's CJS static analyser couldn't trace them). | **Fixed.** `vite.config.ts` sets `build.commonjsOptions = { include: [/dxs-bsv-token-sdk/, /node_modules/], transformMixedEsModules: true }`. Build succeeds, ~10.5 MB bundle (gzip 2.3 MB). |
+| **F2 — Wallet transfers don't reach the overlay** | `BSV21TransferService` only broadcast through wallet-toolbox's default ARC; the 1Sat overlay never saw self-originated transfers, so the recipient's wallet never picked them up via the per-address sync. | **Fixed.** After `signAction` succeeds, the service fetches the signed raw tx via `wallet.getServices().getRawTx(txid)` and POSTs to `OneSatIndexerClient.submitTransaction(...)` (→ `https://api.1sat.app/1sat/tx`). Mirrors the faucet's pattern; matches yours-wallet's `@1sat/client`. Best-effort — failure is logged, transfer still returns `ok: true` (the primary broadcast already happened). |
+| **F3 — DSTAS send (`transferSupported: false`)** | "Out of scope" — I never investigated. | **Deliberately deferred to a focused PR.** The SDK exposes `BuildDstasBaseTx` for spends, but its `Owner` type wants raw `PrivateKey | Wallet` bytes that BRC-42 derivation doesn't surface. The `AllowPresetUnlockingScript` escape hatch needs the DSTAS template's witness format (`docs/DSTAS_LOCKING_TEMPLATE_NOTES.md`) and mandatory `evaluateTransactionHex(...)` validation per the SDK's AGENTS.md. ~half-day of careful integration; not a wrap-in-an-adapter job. |
+| **F4 — BSV-21 partial-amount send** | UI sent the full UTXO only; `BSV21TransferService` already had the change-output branch. | **Fixed.** Send dialog has an Amount field for BSV-21 with validation (`/^\d+$/`, > 0, ≤ source). Live helper shows decimal-formatted value + change amount. STAS/DSTAS unaffected. |
+| **F5 — No tests for new code** | True — only existing STAS tests ran. | **Partially addressed.** `test/tokens/bsv21-inscription.test.ts` adds 12 tests covering build / parse / round-trip / deploy+mint vs transfer / rejection edges for the inscription envelope (the load-bearing pure-function module). `npm run test:tokens` runs them. Other new modules (OneSatIndexerClient SSE, BSV21Registration, migrations) still rely on manual verification. |
 
-### What is *not* a limitation (clarifying my earlier wording)
+The historical "L4 — public 1sat overlay write paths" really is informational rather than a
+wallet limitation — `/1sat/tx` is publicly POSTable and the wallet (after F2) and the faucet
+both route through it. arcade/* and overlay/* writes aren't deployed publicly, but we don't
+need them.
 
-- *"Project has no test suite"* — wrong. The project uses **vitest**. `npm test` runs only the translations spec by default; `npm run test:stas` runs the full STAS suite. The new code just hasn't been backfilled with tests.
-- *"Public 1sat overlay can't index self-broadcast txs"* — wrong. The faucet's `POST /1sat/tx` after WoC broadcast is the indexer-coupling step that **does** make the public overlay index our mints; this works today and is verifiable by querying `/1sat/owner/{addr}/txos?unspent=true` after a mint.
+## Outstanding work
+
+Only one substantive item left:
+
+- **F3 — DSTAS send.** Tracked separately so it gets the focused review the SDK's
+  mandatory `evaluateTransactionHex(...)` validation requires. The adapter remains
+  `transferSupported: false` until then; the UI surfaces this honestly with a
+  disabled Send button + tooltip rather than failing mid-transfer.
+
+Running the test suite (May 2026):
+
+```
+npm run test:stas      # 15 passed / 3 skipped — adapter refactor didn't regress STAS
+npm run test:tokens    # 12 passed — BSV-21 inscription round-trips
+npm run build:renderer # ✓ 14.99s, dist/assets/index-*.js  10.48 MB │ gzip 2.34 MB
+```
 
 ---
 
