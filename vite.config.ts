@@ -24,6 +24,18 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Force Rollup's CommonJS plugin to run on the vendored dxs SDK
+    // dist files. Without this, prod builds fail with
+    // *"ScriptType is not exported by …/bsv.js"* etc. — Rollup sees the
+    // CJS source raw and can't extract named exports. The
+    // `transformMixedEsModules: true` flag handles the SDK's runtime
+    // `__exportStar(require("./submodule"), exports)` pattern for the
+    // ./script subtree (where LockingScriptReader lives). Vite dev is
+    // unaffected (esbuild pre-bundles via optimizeDeps).
+    commonjsOptions: {
+      include: [/dxs-bsv-token-sdk/, /node_modules/],
+      transformMixedEsModules: true,
+    },
   },
   server: {
     port: 5173,

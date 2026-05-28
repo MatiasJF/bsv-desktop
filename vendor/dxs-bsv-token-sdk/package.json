@@ -50,6 +50,12 @@
       "require": "./dist/stas.js",
       "default": "./dist/stas.js"
     },
+    "./script/read/locking-script-reader": {
+      "types": "./dist/script/read/locking-script-reader.d.ts",
+      "import": "./dist/script/read/locking-script-reader.js",
+      "require": "./dist/script/read/locking-script-reader.js",
+      "default": "./dist/script/read/locking-script-reader.js"
+    },
     "./package.json": "./package.json"
   },
   "homepage": "https://github.com/dxsapp/dxs-bsv-token-sdk",

@@ -6,7 +6,20 @@
  * never touches the SDK's reader types directly.
  */
 
-import { ScriptType, LockingScriptReader, toHex } from 'dxs-bsv-token-sdk/bsv';
+import { ScriptType, toHex } from 'dxs-bsv-token-sdk/bsv';
+// `LockingScriptReader` is namespace-imported from the SDK's leaf module
+// because Rollup's CommonJS plugin refuses to surface it as a named ESM
+// export — neither the `/bsv` aggregator (which uses `__exportStar` to
+// forward from ./script) nor the leaf module (which uses the canonical
+// `exports.X = X` pattern) trip its static-named-export detection. Vite
+// dev (esbuild pre-bundle) sees it; Vite prod (Rollup) doesn't.
+//
+// The namespace import works because it doesn't ask Rollup to verify any
+// specific named export — the bundle just gets the whole module object
+// and we pluck the property at module init time. The leaf sub-path is
+// whitelisted in the SDK's `exports` field (vendor/.../package.json).
+import * as LockingScriptReaderModule from 'dxs-bsv-token-sdk/script/read/locking-script-reader';
+const { LockingScriptReader } = LockingScriptReaderModule;
 
 export interface ParsedDstas {
   /** 20-byte owner field (PKH), hex — what ownership recognition matches on. */
