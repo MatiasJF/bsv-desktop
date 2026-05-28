@@ -50,6 +50,14 @@ export default defineConfig({
     include: [
       'dxs-bsv-token-sdk/bsv',
       'dxs-bsv-token-sdk/dstas',
+      // SDK leaf-module paths — same ones the wallet imports directly to
+      // bypass Rollup's `__exportStar` blindness on prod builds. Without
+      // these here, Vite dev serves the raw CJS files to the browser and
+      // they explode with "exports is not defined". The leaf paths are
+      // whitelisted in the SDK's package.json `exports` field.
+      'dxs-bsv-token-sdk/script/read/locking-script-reader',
+      'dxs-bsv-token-sdk/script/build/dstas-locking-builder',
+      'dxs-bsv-token-sdk/script/eval/script-evaluator',
       // stas-js + its bsv-js peer for the BRC-100 STAS transfer path.
       // Explicit file paths — stas-js's package.json points `module` at
       // `dist/index` but ships no `dist/` folder, so plain `stas-js`
