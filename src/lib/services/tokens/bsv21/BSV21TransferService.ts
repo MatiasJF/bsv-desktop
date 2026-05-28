@@ -1,0 +1,333 @@
+/**
+ * BSV21TransferService — build, sign, and broadcast a BSV-21 transfer.
+ *
+ * Unlike STAS, BSV-21 is just an ord-inscription envelope wrapping a
+ * standard P2PKH owner script — no engine, no custom sighash rules,
+ * no payment segments. The transfer is:
+ *
+ *   in :  [ source BSV-21 UTXO (1 sat) ]   ← signed by BRC-42 owner key
+ *         + wallet-funded BSV inputs       ← signed natively by wallet
+ *   out:  [ recipient BSV-21 output (1 sat) ]
+ *         [ optional token-change output (1 sat) ]
+ *         [ wallet BSV change ]            ← added by createAction
+ *
+ * Signing for the BSV-21 input uses standard P2PKH sighash (ALL|FORKID)
+ * over the full source locking script. The unlocking script is the
+ * canonical `<sig> <pubkey>` pair — the ord envelope is dead code
+ * (OP_FALSE OP_IF … OP_ENDIF) and never executes.
+ *
+ * Optional pre-flight origin verification can be enabled (default on)
+ * — calls `OneSatIndexerClient.validateOutputs` and refuses to send if
+ * the source outpoint isn't part of the token's overlay-validated DAG.
+ */
+
+import type { WalletInterface } from '@bsv/sdk';
+import { Beef } from '@bsv/sdk';
+import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv';
+import { BSV21_PROTOCOL_ID, BSV21_COUNTERPARTY } from './constants';
+import { buildBsv21Transfer } from './inscription';
+import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
+import { OneSatIndexerClient } from './OneSatIndexerClient';
+import type { BSV21KeyDeriver } from './BSV21KeyDeriver';
+
+const ORIGINATOR = 'admin.bsv21-transfer';
+
+/** stas-js exports the SIGHASH ALL|FORKID byte we want for P2PKH sigs. */
+const SIGHASH_ALL_FORKID = 0x41; // SIGHASH_ALL (0x01) | SIGHASH_FORKID (0x40)
+
+export interface BSV21TransferArgs {
+  source: {
+    txid: string;
+    vout: number;
+    scriptHex: string;
+    satoshis: number;
+    brc42KeyId: string;
+    /** Token id this UTXO carries — `<txid>_<vout>` of the deploy+mint. */
+    tokenId: string;
+    /** Raw token amount the input holds. */
+    amt: string;
+    /** Decimals + symbol propagate to change tags for UI continuity. */
+    dec?: number;
+    sym?: string;
+    icon?: string;
+  };
+  /** Amount of tokens (raw integer units) to send. */
+  amount: string;
+  recipientAddress: string;
+}
+
+export interface BSV21TransferResult {
+  ok: boolean;
+  txid?: string;
+  reason?: string;
+}
+
+export interface BSV21TransferDeps {
+  wallet: WalletInterface;
+  identityKey: string;
+  chain: 'main' | 'test';
+  /** Deriver used for token-change addresses. */
+  deriver: BSV21KeyDeriver;
+  /** Indexer for optional pre-send origin validation. */
+  indexer: OneSatIndexerClient;
+  /** Toggle the overlay check off when the indexer is known unavailable. */
+  originVerify?: boolean;
+}
+
+/** Dynamic bsv-js import — same pattern StasTransferService uses. */
+async function loadBsvJs(): Promise<{ bsv: any }> {
+  const bsvMod: any = await import('bsv');
+  return { bsv: bsvMod.default ?? bsvMod };
+}
+
+function toHex(bytes: number[] | Uint8Array): string {
+  const arr = Array.isArray(bytes) ? bytes : Array.from(bytes);
+  return arr.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export class BSV21TransferService {
+  constructor(private readonly deps: BSV21TransferDeps) {}
+
+  async transfer(args: BSV21TransferArgs): Promise<BSV21TransferResult> {
+    const { source, amount, recipientAddress } = args;
+    const { wallet, deriver, indexer } = this.deps;
+    const originVerify = this.deps.originVerify ?? true;
+
+    // 1. Validate amounts up front. BSV-21 amounts are bigint strings.
+    let sendAmt: bigint;
+    let inAmt: bigint;
+    try {
+      sendAmt = BigInt(amount);
+      inAmt = BigInt(source.amt);
+      if (sendAmt <= 0n) throw new Error('amount must be > 0');
+      if (sendAmt > inAmt) throw new Error(`amount ${sendAmt} exceeds input ${inAmt}`);
+    } catch (err) {
+      return { ok: false, reason: `amount validation: ${errMsg(err)}` };
+    }
+    const changeAmt = inAmt - sendAmt;
+
+    // 2. Optional origin verification — fail closed.
+    if (originVerify) {
+      try {
+        const valid = await indexer.validateOutputs(source.tokenId, [
+          OneSatIndexerClient.dotToUnderscore(`${source.txid}.${source.vout}`),
+        ]);
+        if (!valid.has(OneSatIndexerClient.dotToUnderscore(`${source.txid}.${source.vout}`))) {
+          return {
+            ok: false,
+            reason: 'Selected UTXO failed origin verification — its inscription chain may not trace back to the canonical deploy.',
+          };
+        }
+      } catch (err) {
+        // Overlay unreachable. Surface but allow the user to retry with originVerify=false.
+        return { ok: false, reason: `origin overlay unreachable: ${errMsg(err)}` };
+      }
+    }
+
+    // 3. Resolve recipient + (optional) change hash160s. Addresses come in
+    //    base58 — bsv-js's Address gives us the hash buffer.
+    let bsv: any;
+    try {
+      ({ bsv } = await loadBsvJs());
+    } catch (err) {
+      return { ok: false, reason: `load bsv-js: ${errMsg(err)}` };
+    }
+    let recipientHash160Hex: string;
+    try {
+      recipientHash160Hex = bsv.Address.fromString(recipientAddress).hashBuffer.toString('hex');
+    } catch (err) {
+      return { ok: false, reason: `invalid recipient: ${errMsg(err)}` };
+    }
+
+    let changeHash160Hex: string | undefined;
+    if (changeAmt > 0n) {
+      try {
+        const ctx = await deriver.createNextReceiveContext();
+        changeHash160Hex = ctx.ownerFieldHash160;
+      } catch (err) {
+        return { ok: false, reason: `derive change key: ${errMsg(err)}` };
+      }
+    }
+
+    // 4. Build the two BSV-21 outputs. Both are 1 sat.
+    const destScriptHex = buildBsv21Transfer({
+      payload: {
+        id: source.tokenId,
+        amt: sendAmt.toString(),
+        dec: source.dec,
+        sym: source.sym,
+        icon: source.icon,
+      },
+      ownerHash160: recipientHash160Hex,
+    });
+    let changeScriptHex: string | undefined;
+    if (changeAmt > 0n && changeHash160Hex) {
+      changeScriptHex = buildBsv21Transfer({
+        payload: {
+          id: source.tokenId,
+          amt: changeAmt.toString(),
+          dec: source.dec,
+          sym: source.sym,
+          icon: source.icon,
+        },
+        ownerHash160: changeHash160Hex,
+      });
+    }
+
+    // 5. Build the inputBEEF that lets internalize/createAction verify the
+    //    spent output. Same chained walkback STAS uses.
+    let inputBEEF: number[];
+    try {
+      const built = await buildChainedAtomicBeef({ wallet, txid: source.txid });
+      inputBEEF = built.beef;
+    } catch (err) {
+      return { ok: false, reason: `inputBEEF: ${errMsg(err)}` };
+    }
+
+    // 6. createAction. The wallet auto-funds BSV and adds standard change.
+    const outputs: any[] = [
+      {
+        lockingScript: destScriptHex,
+        satoshis: 1,
+        outputDescription: 'BSV-21 to recipient',
+      },
+    ];
+    if (changeScriptHex) {
+      outputs.push({
+        lockingScript: changeScriptHex,
+        satoshis: 1,
+        outputDescription: 'BSV-21 token change',
+      });
+    }
+
+    let createRes: any;
+    try {
+      createRes = await wallet.createAction(
+        {
+          inputBEEF,
+          inputs: [
+            {
+              outpoint: `${source.txid}.${source.vout}`,
+              unlockingScriptLength: 108, // standard P2PKH unlock: ~73 sig + 33 pubkey + push opcodes
+              inputDescription: 'BSV-21 token input',
+            },
+          ],
+          outputs,
+          description: 'BSV-21 transfer',
+          options: { randomizeOutputs: false },
+        } as any,
+        ORIGINATOR
+      );
+    } catch (err) {
+      return { ok: false, reason: `createAction: ${errMsg(err)}` };
+    }
+
+    const signable = createRes?.signableTransaction;
+    if (!signable || !signable.tx) {
+      return { ok: false, reason: 'createAction did not return signableTransaction' };
+    }
+
+    // 7. Pull the atomic tx out of the signable BEEF and rebuild a bsv-js
+    //    Transaction so we can compute the sighash. Same trick as STAS.
+    let tx: any;
+    try {
+      const beef = Beef.fromBinary(signable.tx);
+      const atomicTxid = (beef as any).atomicTxid as string | undefined;
+      if (!atomicTxid) return { ok: false, reason: 'signable BEEF has no atomic txid' };
+      const btx = beef.findTxid(atomicTxid);
+      if (!btx?.tx) return { ok: false, reason: `signable BEEF missing atomic tx ${atomicTxid}` };
+      const rawTxBytes = btx.tx.toBinary();
+      tx = new bsv.Transaction(Buffer.from(rawTxBytes).toString('hex'));
+      tx.inputs[0].output = new bsv.Transaction.Output({
+        script: bsv.Script.fromHex(source.scriptHex),
+        satoshis: source.satoshis,
+      });
+    } catch (err) {
+      return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
+    }
+
+    // 8. Compute the P2PKH sighash for input 0 over the full source script.
+    //    The ord envelope at the head is dead code on eval but participates
+    //    in the sighash subject (BSV sighash hashes whole locking script).
+    let sigHex: string;
+    let ownerPubKeyHex: string;
+    try {
+      const sourceLocking = bsv.Script.fromHex(source.scriptHex);
+      const satsBN = new bsv.crypto.BN(source.satoshis);
+      const preimage = bsv.Transaction.sighash.sighashPreimage(
+        tx, SIGHASH_ALL_FORKID, 0, sourceLocking, satsBN
+      );
+      const digestBuf = bsv.crypto.Hash.sha256sha256(preimage);
+      const digestBytes = Array.from(digestBuf as Buffer) as number[];
+
+      const sigRes = await wallet.createSignature(
+        {
+          protocolID: BSV21_PROTOCOL_ID as any,
+          keyID: source.brc42KeyId,
+          counterparty: BSV21_COUNTERPARTY as any,
+          hashToDirectlySign: digestBytes,
+        } as any,
+        ORIGINATOR
+      );
+      sigHex = toHex(sigRes.signature) + SIGHASH_ALL_FORKID.toString(16).padStart(2, '0');
+
+      // Derive the matching pubkey for the unlocking script.
+      const { publicKey } = await wallet.getPublicKey(
+        {
+          protocolID: BSV21_PROTOCOL_ID as any,
+          keyID: source.brc42KeyId,
+          counterparty: BSV21_COUNTERPARTY as any,
+        } as any,
+        ORIGINATOR
+      );
+      ownerPubKeyHex = publicKey;
+    } catch (err) {
+      return { ok: false, reason: `sighash/sign: ${errMsg(err)}` };
+    }
+
+    // 9. Standard P2PKH unlocking script: <sig> <pubkey>.
+    let unlockingScriptHex: string;
+    try {
+      const asm = `${sigHex} ${ownerPubKeyHex}`;
+      unlockingScriptHex = bsv.Script.fromASM(asm).toHex();
+    } catch (err) {
+      return { ok: false, reason: `unlocking script assembly: ${errMsg(err)}` };
+    }
+
+    // 10. signAction — the wallet queues + monitor worker handles broadcast.
+    let signResp: any;
+    try {
+      signResp = await wallet.signAction(
+        {
+          reference: signable.reference,
+          spends: { 0: { unlockingScript: unlockingScriptHex } },
+        } as any,
+        ORIGINATOR
+      );
+    } catch (err) {
+      return { ok: false, reason: `signAction: ${errMsg(err)}` };
+    }
+
+    const sendResults: any[] = Array.isArray(signResp?.sendWithResults)
+      ? signResp.sendWithResults
+      : [];
+    const failed = sendResults.find((r) => r?.status === 'failed');
+    if (failed) {
+      return {
+        ok: false,
+        reason: `broadcast failed: ${JSON.stringify(failed)} (txid was ${signResp?.txid})`,
+      };
+    }
+
+    return { ok: true, txid: signResp?.txid };
+  }
+}
+
+// Suppress an unused-import warning — `fromHex` and `Address` may be useful
+// in the future for richer address-handling and we want to keep the import
+// surface aligned with the rest of the BSV-21 module.
+void fromHex; void Address;

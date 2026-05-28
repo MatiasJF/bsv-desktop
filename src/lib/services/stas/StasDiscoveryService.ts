@@ -16,63 +16,30 @@
 import { Transaction } from '@bsv/sdk';
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv';
 import { STAS_GAP_LIMIT } from './constants';
-import { parseDstasLockingScript, type ParsedDstas } from './dstasParser';
+import type { ParsedDstas } from './dstasParser';
 import type { StasKeyDeriver } from './StasKeyDeriver';
 import type { StasRegistration } from './StasRegistration';
 import type { IndexerClient } from './IndexerClient';
 import { stasQuery } from './stasIpc';
-import { findCreateContractTxid } from './findCreateContractTxid';
-import { parseClassicStasMetadata } from './parseClassicStasMetadata';
+import { TOKEN_BASKETS } from '../../constants/baskets';
+import type { TokenProtocolRegistry, ParsedTokenOutput } from '../tokens';
 
 /**
- * Extract the owner hash160 from a CLASSIC STAS locking script.
- *
- * Classic STAS contracts always begin with a canonical P2PKH-shaped prefix
- * containing the owner's hash160, immediately followed by OP_VERIFY:
- *
- *   76 a9 14 <20-byte owner-hash160> 88 ac 69  …STAS engine bytes…
- *   ^ OP_DUP                          ^^ ^^ ^^ OP_EQUALVERIFY/OP_CHECKSIG/OP_VERIFY
- *
- * Returns the hash160 as 40-hex-char lowercase, or null if the script doesn't
- * match. This lets us classify and own classic STAS UTXOs even though our
- * DSTAS parser (from the dxs SDK) returns null for them.
+ * Adapter-shaped parsed token output the legacy registration expects.
+ * Maps the cross-protocol `ParsedTokenOutput` back onto the existing
+ * `ParsedDstas`-plus-symbol shape so we don't have to rewrite
+ * StasRegistration's payload contract in this PR.
  */
-function tryParseClassicStasOwner(scriptHex: string): string | null {
-  if (typeof scriptHex !== 'string' || scriptHex.length < 56) return null;
-  if (!scriptHex.startsWith('76a914')) return null;
-  if (scriptHex.substring(46, 52) !== '88ac69') return null;
-  return scriptHex.substring(6, 46);
-}
-
-/**
- * Build a classic-STAS parsed object: owner + symbol + flags from script,
- * plus the CreateContract txid as canonical tokenId (walked back via
- * `findCreateContractTxid`). Falls back to empty values if any step fails.
- */
-async function buildClassicStasParsed(
-  wallet: any,
-  txid: string,
-  scriptHex: string
-): Promise<ParsedDstas | null> {
-  const meta = parseClassicStasMetadata(scriptHex);
-  if (!meta) return null;
-  let tokenId = '';
-  try {
-    const cc = await findCreateContractTxid({ wallet, txid });
-    if (cc.tokenId) tokenId = cc.tokenId;
-  } catch {
-    /* keep empty tokenId */
-  }
+function toRichParsed(parsed: ParsedTokenOutput): ParsedDstas & { symbol?: string } {
   return {
-    ownerFieldHash160: meta.ownerFieldHash160,
-    tokenId,
-    freezeEnabled: false,
-    confiscationEnabled: false,
-    flagsHex: meta.flagsHex ?? '',
-    serviceFields: [],
-    // symbol surfaced separately so register can populate stas_tokens.
-    symbol: meta.symbol ?? undefined,
-  } as ParsedDstas & { symbol?: string };
+    ownerFieldHash160: parsed.ownerFieldHash160,
+    tokenId: parsed.tokenId,
+    freezeEnabled: parsed.freezeEnabled ?? false,
+    confiscationEnabled: parsed.confiscationEnabled ?? false,
+    flagsHex: parsed.flagsHex ?? '',
+    serviceFields: parsed.serviceFields ?? [],
+    symbol: parsed.symbol,
+  };
 }
 
 export interface ScanResult {
@@ -104,6 +71,12 @@ export interface StasDiscoveryDeps {
   registration: StasRegistration;
   /** Wallet exposing `getServices()` (wallet-toolbox Wallet). */
   wallet: any;
+  /**
+   * Token-protocol adapters, in resolution order. Each candidate locking
+   * script is offered to every adapter; the first that recognises it
+   * decides the protocol + basket the UTXO is registered under.
+   */
+  registry: TokenProtocolRegistry;
   gapLimit?: number;
 }
 
@@ -128,12 +101,18 @@ export class StasDiscoveryService {
   constructor(private readonly deps: StasDiscoveryDeps) {}
 
   /**
-   * Register a STAS UTXO directly by txid, bypassing the (WoC-broken)
-   * address-based scan. WoC indexes outputs at P2PKH addresses; DSTAS outputs
-   * are custom scripts, never findable that way. Real STAS wallets use
-   * STAS-aware indexers — until we have one, this method is the pragmatic
-   * escape hatch: the user (or sender) tells the wallet the txid, and the
-   * wallet parses + registers every owned DSTAS output in that tx.
+   * DEMO-ONLY fast-path: register a STAS UTXO directly by txid.
+   *
+   * The PRIMARY discovery mechanism is `scan()` — enumerate derived
+   * receive addresses, query the STAS-aware indexer (Bitails) per-address
+   * for owned UTXOs, parse + register. That covers organic receive without
+   * the sender having to tell us anything beyond the recipient address.
+   *
+   * This method exists so a colocated mint flow (dex-shell after a faucet
+   * mint) can skip the indexer round-trip and get immediate UI feedback —
+   * the wallet fetches the tx directly, parses outputs, and internalizes
+   * matches. Useful too as a fallback when the address-based scan is
+   * unavailable (e.g. WoC doesn't index custom-script outputs by address).
    */
   async registerByTxid(txid: string): Promise<RegisterByTxidResult> {
     const out: RegisterByTxidResult = { txid, registered: 0, outputs: [] };
@@ -171,25 +150,20 @@ export class StasDiscoveryService {
       const txout = tx.outputs[vout];
       const lockingScriptHex: string = txout.lockingScript.toHex();
 
-      // Try DSTAS first; for classic STAS fall back to extracting the owner
-      // hash160 from the canonical P2PKH+OP_VERIFY prefix, then walk the
-      // input chain to find the CreateContract txid (canonical tokenId).
-      let parsed: (ParsedDstas & { symbol?: string }) | null = parseDstasLockingScript(lockingScriptHex);
-      let ownerFieldHash160: string | undefined = parsed?.ownerFieldHash160;
-      if (!parsed) {
-        const classic = await buildClassicStasParsed(this.deps.wallet, txid, lockingScriptHex);
-        if (classic) {
-          ownerFieldHash160 = classic.ownerFieldHash160;
-          parsed = classic;
-        }
-      }
-
-      if (!parsed || !ownerFieldHash160) {
+      // Ask the registry: which protocol (if any) recognises this script?
+      // STAS / DSTAS adapters are tried in registration order; the first
+      // match wins. Each adapter returns its own parsed payload.
+      const match = await this.deps.registry.find(lockingScriptHex, {
+        txid,
+        vout,
+        wallet: this.deps.wallet,
+      });
+      if (!match) {
         out.outputs.push({ vout, matched: false });
         continue;
       }
 
-      const keyIndex = ownerMap.get(ownerFieldHash160);
+      const keyIndex = ownerMap.get(match.parsed.ownerFieldHash160);
       if (keyIndex === undefined) {
         out.outputs.push({ vout, matched: false });
         continue;
@@ -199,9 +173,10 @@ export class StasDiscoveryService {
         txid,
         vout,
         tokenSatoshis: txout.satoshis ?? 0,
-        ownerFieldHash160,
+        ownerFieldHash160: match.parsed.ownerFieldHash160,
         brc42KeyId: `recv ${keyIndex}`,
-        parsed,
+        parsed: toRichParsed(match.parsed),
+        protocol: { id: match.adapter.id, basketName: match.adapter.basketName },
       });
       const ok = !!reg.registered;
       if (ok) out.registered++;
@@ -269,12 +244,11 @@ export class StasDiscoveryService {
     const txCache = new Map<string, Transaction>();
 
     for (const { address, utxos } of scanned) {
-      // WoC's STAS indexer is queried per-derived-address, so every UTXO it
-      // returns is owned by THIS address by construction. We use that address
-      // mapping as the source of truth for ownership instead of re-parsing the
-      // locking script — that way classic STAS (which the dxs DSTAS parser
-      // rejects) still goes through. The parser is still attempted for
-      // metadata; if it returns null we build a placeholder.
+      // The indexer is queried per-derived-address, so every UTXO it returns
+      // is owned by THIS address by construction. We use that mapping as the
+      // ultimate source of truth: if the registry's parse doesn't recover an
+      // owner hash160 (e.g. a classic STAS whose CreateContract walkback
+      // fails), the address-binding still tells us which key owns it.
       const ownerHash160Hex = addressToHash.get(address);
       const ownerKeyIndex = ownerHash160Hex ? ownerMap.get(ownerHash160Hex) : undefined;
 
@@ -283,10 +257,9 @@ export class StasDiscoveryService {
         try {
           // Idempotency pre-check — saves fetching tx/proof for known outpoints.
           // Counts already-known UTXOs into dstas + ownedAndDstas too, so the
-          // panel reflects "STAS the wallet recognises at the scanned range"
-          // rather than just "newly registered this scan". Without this,
-          // a re-scan after auto-discovery shows DSTAS 0 / Owned 0 even though
-          // every UTXO is wallet-owned — confusing.
+          // panel reflects "tokens the wallet recognises at the scanned range"
+          // rather than just "newly registered this scan". Field names are
+          // legacy STAS-era; treat as "recognised tokens" / "matched to a key".
           try {
             const existing = await stasQuery(identityKey, chain, 'findStasOutputByOutpoint', [utxo.txid, utxo.vout]);
             if (existing) {
@@ -326,27 +299,30 @@ export class StasDiscoveryService {
           }
           const lockingScriptHex = out.lockingScript.toHex();
 
-          // Two protocols possible:
-          //   - DSTAS: dstasParser succeeds; we trust IT for ownership.
-          //   - Classic STAS: dstasParser returns null; trust the indexer's
-          //     address mapping + extract symbol/flags + walk back to find
-          //     the CreateContract txid (canonical tokenId).
-          let parsed: (ParsedDstas & { symbol?: string }) | null =
-            parseDstasLockingScript(lockingScriptHex);
-          let keyIndex: number | undefined;
-          if (parsed) {
-            keyIndex = ownerMap.get(parsed.ownerFieldHash160);
-          } else {
-            if (!ownerHash160Hex || ownerKeyIndex === undefined) continue;
-            const classic = await buildClassicStasParsed(
-              this.deps.wallet,
-              utxo.txid,
-              lockingScriptHex
-            );
-            if (!classic) continue;
-            parsed = classic;
-            keyIndex = ownerKeyIndex;
-          }
+          // Ask the registry to recognise the script. Each adapter is asked
+          // in registration order; the first that returns a parsed payload
+          // owns the registration (and decides the destination basket).
+          const match = await this.deps.registry.find(lockingScriptHex, {
+            txid: utxo.txid,
+            vout: utxo.vout,
+            wallet: this.deps.wallet,
+          });
+          if (!match) continue;
+
+          // Ownership: the script's owner field is authoritative when the
+          // adapter recovered one (DSTAS / classic STAS — both always do).
+          // The indexer-address binding is only used as a fallback for
+          // adapters that can't recover an owner field from the script
+          // bytes alone — important defense: if an adapter DID parse an
+          // owner field and it doesn't match any derived key, the UTXO is
+          // NOT ours, even when the indexer places it at our address (e.g.
+          // a malicious sender forges the address-binding side).
+          const parsedOwner = match.parsed.ownerFieldHash160;
+          const matchedOwnerHash160 = parsedOwner || ownerHash160Hex || '';
+          const keyIndex = parsedOwner
+            ? ownerMap.get(parsedOwner)
+            : ownerKeyIndex;
+
           result.dstas++;
           if (keyIndex === undefined) continue;
           result.ownedAndDstas++;
@@ -355,17 +331,18 @@ export class StasDiscoveryService {
           // indexer reported height 0. Bitails surfaces unconfirmed STAS too,
           // and Task 4c's buildChainedAtomicBeef walks back through inputs to
           // a confirmed ancestor, so mempool UTXOs are no longer special-cased.
-          // If chained BEEF assembly fails (e.g. inputs not yet fetchable), the
-          // registration returns false and the discovery loop records the
-          // error; the next scan retries.
 
           const reg = await this.deps.registration.register({
             txid: utxo.txid,
             vout: utxo.vout,
             tokenSatoshis: utxo.value,
-            ownerFieldHash160: parsed.ownerFieldHash160,
+            ownerFieldHash160: matchedOwnerHash160,
             brc42KeyId: `recv ${keyIndex}`,
-            parsed,
+            parsed: toRichParsed(match.parsed),
+            protocol: {
+              id: match.adapter.id,
+              basketName: match.adapter.basketName,
+            },
           });
 
           if (reg.registered) {
@@ -373,7 +350,7 @@ export class StasDiscoveryService {
             result.registeredOutpoints.push({
               txid: utxo.txid,
               vout: utxo.vout,
-              tokenId: parsed.tokenId,
+              tokenId: match.parsed.tokenId,
             });
           } else if (reg.reason === 'already registered') {
             result.skippedAlreadyKnown++;
@@ -389,14 +366,21 @@ export class StasDiscoveryService {
       }
     }
 
-    // Backfill: flip spendable=true on every STAS basket output that's still
-    // marked false. Closes the gap for outputs registered before the
-    // auto-flip-at-register fix landed.
+    // Backfill: flip spendable=true on every token basket's outputs that are
+    // still marked false. Runs once per protocol so DSTAS holdings (now in
+    // their own basket) get the same treatment classic STAS used to get.
     try {
-      const bf: any = await stasQuery(identityKey, chain, 'backfillStasSpendable', []);
-      if (bf && typeof bf.updated === 'number') {
-        result.spendableFlipped = bf.updated;
+      let total = 0;
+      for (const basket of TOKEN_BASKETS) {
+        const bf: any = await stasQuery(
+          identityKey,
+          chain,
+          'backfillSpendableForBasket',
+          [basket]
+        );
+        if (bf && typeof bf.updated === 'number') total += bf.updated;
       }
+      result.spendableFlipped = total;
     } catch {
       /* best effort */
     }

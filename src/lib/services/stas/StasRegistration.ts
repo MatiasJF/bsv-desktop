@@ -20,6 +20,22 @@ import type { ParsedDstas } from './dstasParser';
 /** Classic-STAS parsed payload extends ParsedDstas with optional symbol. */
 type RichParsed = ParsedDstas & { symbol?: string };
 
+/**
+ * Minimal protocol descriptor consumed by registration. Defined as a
+ * primitive shape (id + basketName) rather than importing the full
+ * `TokenProtocolAdapter` so the stas/ layer doesn't depend on the
+ * tokens/ layer that wraps it.
+ */
+export interface RegistrationProtocol {
+  id: 'stas' | 'dstas' | 'bsv-21';
+  basketName: string;
+}
+
+const DEFAULT_PROTOCOL: RegistrationProtocol = {
+  id: 'stas',
+  basketName: STAS_BASKET,
+};
+
 export interface RegisterStasArgs {
   txid: string;
   vout: number;
@@ -31,6 +47,12 @@ export interface RegisterStasArgs {
   brc42KeyId: string;
   /** Parsed DSTAS fields. Classic STAS also carries an optional `symbol`. */
   parsed: RichParsed;
+  /**
+   * Protocol descriptor — chooses the destination basket and stamps
+   * `protocol` on the satellite rows. Defaults to classic STAS for
+   * legacy callers that haven't been wired through the registry yet.
+   */
+  protocol?: RegistrationProtocol;
 }
 
 export interface RegisterStasResult {
@@ -53,6 +75,7 @@ export class StasRegistration {
 
   async register(args: RegisterStasArgs): Promise<RegisterStasResult> {
     const { txid, vout, parsed, brc42KeyId, ownerFieldHash160, tokenSatoshis } = args;
+    const protocol = args.protocol ?? DEFAULT_PROTOCOL;
 
     // 1. Idempotency — skip outpoints that already live in stas_outputs.
     try {
@@ -103,13 +126,19 @@ export class StasRegistration {
               outputIndex: vout,
               protocol: 'basket insertion',
               insertionRemittance: {
-                basket: STAS_BASKET,
+                basket: protocol.basketName,
                 customInstructions,
-                tags: ['dstas'],
+                tags: [protocol.id],
               },
             },
           ],
-          description: 'STAS discovery',
+          // Display-cased label — preserves the original "STAS discovery"
+          // wording for STAS while staying protocol-aware for the others.
+          description: `${
+            protocol.id === 'bsv-21'
+              ? 'BSV-21'
+              : protocol.id.toUpperCase()
+          } discovery`,
           seekPermission: false,
         },
         ORIGINATOR
@@ -144,6 +173,7 @@ export class StasRegistration {
             issuerIdentityKey: undefined,
             flagsHex: parsed.flagsHex,
             createdAt: now,
+            protocol: protocol.id,
           },
         ]);
         await this.stasQuery('insertStasOutput', [
@@ -158,6 +188,7 @@ export class StasRegistration {
             serviceFieldsJson: JSON.stringify(parsed.serviceFields),
             createdAt: now,
             updatedAt: now,
+            protocol: protocol.id,
           },
         ]);
         // STAS outputs land with `spendable=false` because wallet-toolbox

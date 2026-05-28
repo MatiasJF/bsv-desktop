@@ -44,6 +44,9 @@ import { QRCodeSVG } from 'qrcode.react'
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv'
 import { WalletContext } from '../../WalletContext'
 import { stasQuery } from '../../services/stas'
+import type { TokenProtocolId, Bsv21SendExtras } from '../../services/tokens'
+import { parseBsv21LockingScript } from '../../services/tokens'
+import { BSV21_BASKET } from '../../constants/baskets'
 
 interface OutputView {
   outpoint: string
@@ -64,6 +67,18 @@ interface OutputView {
   spentBy: string | null
   /** ISO timestamp from stas_outputs.createdAt — used for activity ordering. */
   createdAt: string | null
+  /** Which token protocol this UTXO belongs to. */
+  protocol: TokenProtocolId
+  /**
+   * Raw token amount (stringified bigint). For STAS/DSTAS this is `satoshis`
+   * since their satoshisPerToken=1. For BSV-21 it's the `amt` field parsed
+   * from the basket tag, which may be much larger than the 1-sat output.
+   */
+  tokenAmount: string
+  /** Decimal precision for display. Zero for STAS/DSTAS. */
+  decimals: number
+  /** Optional icon URL/outpoint for BSV-21. */
+  icon: string | null
 }
 
 interface TokenGroup {
@@ -75,14 +90,40 @@ interface TokenGroup {
   totalSatoshis: number
   spendableSatoshis: number
   outputs: OutputView[]
+  /** Protocol this group represents — distinct protocols never merge. */
+  protocol: TokenProtocolId
+  /** Sum of `tokenAmount` across outputs in this group (stringified bigint). */
+  tokenAmount: string
+  /** Same, but only for spendable outputs. */
+  spendableTokenAmount: string
+  /** Decimal precision for display, taken from the first output. */
+  decimals: number
+}
+
+/**
+ * Parse a stringified bigint defensively. BSV-21 `amt` tags come from
+ * arbitrary minter input and can be anything — non-numeric values used
+ * to crash the entire AssetsPage at the `BigInt()` call site. Return
+ * `0n` for anything that doesn't parse so the row still renders.
+ */
+function safeBigInt(s: string | null | undefined): bigint {
+  if (!s) return 0n
+  try {
+    return BigInt(s)
+  } catch {
+    return 0n
+  }
 }
 
 function groupByToken(outputs: OutputView[]): TokenGroup[] {
   const byKey = new Map<string, TokenGroup>()
   for (const o of outputs) {
-    // Prefer (symbol, tokenId) tuple — even if multiple tokens share a
-    // symbol they stay separate. Empty tokenId falls back to symbol-only.
-    const key = o.tokenId ? `${o.symbol ?? '?'}::${o.tokenId}` : o.symbol ?? 'unknown'
+    // Key on (protocol, symbol, tokenId) so a DSTAS and STAS that happen
+    // to share a symbol never collapse into one card. Empty tokenId falls
+    // back to (protocol, symbol).
+    const key = o.tokenId
+      ? `${o.protocol}::${o.symbol ?? '?'}::${o.tokenId}`
+      : `${o.protocol}::${o.symbol ?? 'unknown'}`
     let g = byKey.get(key)
     if (!g) {
       g = {
@@ -94,17 +135,129 @@ function groupByToken(outputs: OutputView[]): TokenGroup[] {
         totalSatoshis: 0,
         spendableSatoshis: 0,
         outputs: [],
+        protocol: o.protocol,
+        tokenAmount: '0',
+        spendableTokenAmount: '0',
+        decimals: o.decimals,
       }
       byKey.set(key, g)
     }
     g.outputCount += 1
     g.totalSatoshis += o.satoshis
     if (o.spendable) g.spendableSatoshis += o.satoshis
+    // BigInt sums for token amounts — BSV-21 values can exceed JS's safe-int.
+    // `safeBigInt` defends against malformed amt tags (e.g. someone minted
+    // BSV-21 with `amt: "lorem ipsum"`); we keep the row visible at 0.
+    g.tokenAmount = (safeBigInt(g.tokenAmount) + safeBigInt(o.tokenAmount)).toString()
+    if (o.spendable) {
+      g.spendableTokenAmount = (safeBigInt(g.spendableTokenAmount) + safeBigInt(o.tokenAmount)).toString()
+    }
     if (o.tokenId) g.tokenIds.add(o.tokenId)
     if (!g.name && o.name) g.name = o.name
     g.outputs.push(o)
   }
-  return Array.from(byKey.values()).sort((a, b) => b.totalSatoshis - a.totalSatoshis)
+  // Sort by spendable-amount descending. BigInt-safe comparator.
+  return Array.from(byKey.values()).sort((a, b) => {
+    const av = safeBigInt(a.tokenAmount)
+    const bv = safeBigInt(b.tokenAmount)
+    return av < bv ? 1 : av > bv ? -1 : 0
+  })
+}
+
+/**
+ * Format a raw token amount (stringified bigint) with the protocol's
+ * decimal precision. `dec=0` is the STAS/DSTAS case — render the integer
+ * with locale separators. `dec>0` is BSV-21 — divide by 10^dec and trim
+ * trailing zeros so 1500000 with dec=6 reads as "1.5", not "1.500000".
+ */
+function formatTokenAmount(amount: string, dec: number): string {
+  // Defensive: malformed `amt` tags (non-numeric strings, e.g. when a mint
+  // call accidentally passed "lorem ipsum") show as `?` rather than crashing.
+  let n: bigint
+  try { n = BigInt(amount || '0') } catch { return amount ? `? (${amount})` : '0' }
+  if (dec === 0) return n.toLocaleString()
+  const divisor = 10n ** BigInt(dec)
+  const integer = n / divisor
+  const fraction = n % divisor
+  const intStr = integer.toLocaleString()
+  const fracPadded = fraction.toString().padStart(dec, '0')
+  const fracTrimmed = fracPadded.replace(/0+$/, '')
+  return fracTrimmed ? `${intStr}.${fracTrimmed}` : intStr
+}
+
+/** Extract tag values like `id:abc` → `abc`. Returns undefined if absent. */
+function tagValue(tags: string[] | undefined, prefix: string): string | undefined {
+  if (!tags) return undefined
+  for (const t of tags) {
+    if (t.startsWith(prefix + ':')) return t.slice(prefix.length + 1)
+  }
+  return undefined
+}
+
+/** Parse customInstructions JSON safely; returns null if malformed. */
+function parseCustomInstructions(s: string | null | undefined): any | null {
+  if (!s) return null
+  try { return JSON.parse(s) } catch { return null }
+}
+
+/**
+ * Shape a wallet-toolbox `listOutputs` row from the `bsv-21-tokens` basket
+ * into the unified `OutputView`. Token-level metadata (id, amt, dec, sym,
+ * icon) lives on basket TAGS per 1sat-toolbox convention; BRC-42 unlock
+ * context lives in customInstructions.
+ */
+function bsv21RowToView(o: any): OutputView {
+  const tags: string[] | undefined = o.tags
+  const tokenId = tagValue(tags, 'id') ?? ''
+  const amt = tagValue(tags, 'amt') ?? '0'
+  const decStr = tagValue(tags, 'dec')
+  const decimals = decStr ? Number(decStr) : 0
+  const sym = tagValue(tags, 'sym') ?? null
+  const icon = tagValue(tags, 'icon') ?? null
+
+  const ci = parseCustomInstructions(o.customInstructions)
+  const brc42KeyId = (ci && typeof ci.keyID === 'string') ? ci.keyID : null
+  const ownerAddrFromCI = (ci && typeof ci.ownerAddress === 'string') ? ci.ownerAddress : null
+
+  // Locking script may include the full ord envelope; parse to recover the
+  // P2PKH owner hash160. Fall back to customInstructions for the address.
+  const scriptHex: string | null = o.lockingScript ?? null
+  const parsed = scriptHex ? parseBsv21LockingScript(scriptHex) : null
+
+  const [txid, voutStr] = (o.outpoint ?? '.').split('.')
+  const vout = Number(voutStr)
+
+  return {
+    outpoint: o.outpoint,
+    txid,
+    vout: Number.isNaN(vout) ? 0 : vout,
+    satoshis: o.satoshis ?? 1,
+    spendable: !!o.spendable,
+    tokenId,
+    symbol: sym,
+    name: null,
+    brc42KeyId,
+    ownerFieldHash160: parsed?.ownerHash160 ?? '',
+    ownerAddress: ownerAddrFromCI ?? (parsed ? hash160ToAddress(parsed.ownerHash160) : ''),
+    scriptHex,
+    frozen: false,
+    confiscated: false,
+    spentBy: null,
+    createdAt: o.createdAt ?? null,
+    protocol: 'bsv-21',
+    tokenAmount: amt,
+    decimals,
+    icon,
+  }
+}
+
+/** Display label for the protocol badge chip. */
+function protocolLabel(p: TokenProtocolId): string {
+  switch (p) {
+    case 'stas': return 'STAS'
+    case 'dstas': return 'DSTAS'
+    case 'bsv-21': return 'BSV-21'
+  }
 }
 
 function hash160ToAddress(hash160Hex: string): string {
@@ -128,6 +281,8 @@ export default function AssetsPage() {
   const [generatingReceive, setGeneratingReceive] = useState(false)
   const [receiveCopied, setReceiveCopied] = useState(false)
   const [receiveError, setReceiveError] = useState<string | null>(null)
+  /** Which protocol the next "Generate new address" derives under. */
+  const [receiveProtocol, setReceiveProtocol] = useState<TokenProtocolId>('stas')
 
   const [sendTarget, setSendTarget] = useState<OutputView | null>(null)
   const [sendRecipient, setSendRecipient] = useState('')
@@ -155,26 +310,58 @@ export default function AssetsPage() {
       const tokenMap: Record<string, any> = {}
       for (const t of tokensRaw ?? []) tokenMap[t.tokenId] = t
 
-      const toView = (o: any): OutputView => ({
-        outpoint: `${o.txid}.${o.vout}`,
-        txid: o.txid,
-        vout: o.vout,
-        satoshis: o.outputSatoshis ?? o.tokenSatoshis ?? 0,
-        spendable: !!o.spendable,
-        tokenId: o.tokenId ?? '',
-        symbol: tokenMap[o.tokenId]?.symbol ?? o.symbol ?? null,
-        name: tokenMap[o.tokenId]?.name ?? null,
-        brc42KeyId: o.brc42KeyId ?? null,
-        ownerFieldHash160: o.ownerFieldHash160,
-        ownerAddress: hash160ToAddress(o.ownerFieldHash160),
-        scriptHex: o.lockingScript ?? null,
-        frozen: !!o.frozen,
-        confiscated: !!o.confiscated,
-        spentBy: o.spentBy ?? null,
-        createdAt: o.createdAt ?? null,
-      })
+      const toView = (o: any): OutputView => {
+        const sats = o.outputSatoshis ?? o.tokenSatoshis ?? 0
+        return {
+          outpoint: `${o.txid}.${o.vout}`,
+          txid: o.txid,
+          vout: o.vout,
+          satoshis: sats,
+          spendable: !!o.spendable,
+          tokenId: o.tokenId ?? '',
+          symbol: tokenMap[o.tokenId]?.symbol ?? o.symbol ?? null,
+          name: tokenMap[o.tokenId]?.name ?? null,
+          brc42KeyId: o.brc42KeyId ?? null,
+          ownerFieldHash160: o.ownerFieldHash160,
+          ownerAddress: hash160ToAddress(o.ownerFieldHash160),
+          scriptHex: o.lockingScript ?? null,
+          frozen: !!o.frozen,
+          confiscated: !!o.confiscated,
+          spentBy: o.spentBy ?? null,
+          createdAt: o.createdAt ?? null,
+          // Stamped by migration 0002; legacy rows default to 'stas'.
+          protocol: (o.protocol as TokenProtocolId) ?? 'stas',
+          // STAS/DSTAS: satoshisPerToken=1, so tokenAmount = satoshis.
+          tokenAmount: String(sats),
+          decimals: 0,
+          icon: null,
+        }
+      }
 
-      setHoldings((outputsRaw ?? []).map(toView))
+      // STAS / DSTAS holdings.
+      const stasHoldings = (outputsRaw ?? []).map(toView)
+
+      // BSV-21 holdings — second data source. Goes through the BRC-100
+      // listOutputs surface so tags (id/amt/dec/sym/icon) come back with
+      // each row. The IPC basket query doesn't expose tags.
+      let bsv21Holdings: OutputView[] = []
+      if (wallet) {
+        try {
+          const res: any = await wallet.listOutputs({
+            basket: BSV21_BASKET,
+            includeTags: true,
+            include: 'locking scripts',
+            limit: 10000,
+          } as any)
+          const rows: any[] = res?.outputs ?? []
+          bsv21Holdings = rows.map(bsv21RowToView)
+        } catch {
+          /* BSV-21 holdings just won't surface if the basket is missing */
+        }
+      }
+
+      setHoldings([...stasHoldings, ...bsv21Holdings])
+
       // Sent = anything from the "all" set that has spentBy set (and isn't in
       // the current set). Newest first by createdAt (best proxy we have).
       const sent = (allRaw ?? [])
@@ -187,7 +374,7 @@ export default function AssetsPage() {
     } finally {
       setLoading(false)
     }
-  }, [identityKey, chain])
+  }, [identityKey, chain, wallet])
 
   // Wraps loadHoldings with a real Bitails discovery scan first — picks up
   // STAS that arrived after the wallet's startup auto-scan. Without this the
@@ -203,13 +390,28 @@ export default function AssetsPage() {
     setScanning(true)
     setScanSummary(null)
     try {
-      const r = await stas.discovery.scan()
+      // Run STAS / DSTAS first (per-address Bitails scan), then BSV-21
+      // (per-address 1Sat REST). Sequential so error attribution is clear
+      // in the summary line below.
+      const stasRes = await stas.discovery.scan()
       const bits: string[] = []
-      bits.push(`${r.candidates ?? 0} found`)
-      if ((r.registered ?? 0) > 0) bits.push(`${r.registered} new`)
-      if ((r.skippedAlreadyKnown ?? 0) > 0) bits.push(`${r.skippedAlreadyKnown} already known`)
-      if ((r.deferred ?? 0) > 0) bits.push(`${r.deferred} deferred`)
-      if ((r.errors?.length ?? 0) > 0) bits.push(`${r.errors.length} errors`)
+      bits.push(`STAS: ${stasRes.candidates ?? 0} found`)
+      if ((stasRes.registered ?? 0) > 0) bits.push(`${stasRes.registered} new`)
+      if ((stasRes.skippedAlreadyKnown ?? 0) > 0) bits.push(`${stasRes.skippedAlreadyKnown} known`)
+      if ((stasRes.deferred ?? 0) > 0) bits.push(`${stasRes.deferred} deferred`)
+      if ((stasRes.errors?.length ?? 0) > 0) bits.push(`${stasRes.errors.length} errors`)
+
+      if (stas.bsv21Discovery) {
+        try {
+          const bsv21Res = await stas.bsv21Discovery.scan()
+          bits.push(`· BSV-21: ${bsv21Res.candidates ?? 0} found`)
+          if ((bsv21Res.registered ?? 0) > 0) bits.push(`${bsv21Res.registered} new`)
+          if ((bsv21Res.skippedAlreadyKnown ?? 0) > 0) bits.push(`${bsv21Res.skippedAlreadyKnown} known`)
+          if ((bsv21Res.errors?.length ?? 0) > 0) bits.push(`${bsv21Res.errors.length} errors`)
+        } catch (e) {
+          bits.push(`· BSV-21 scan failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       setScanSummary(bits.join(' · '))
     } catch (e) {
       setScanSummary(`scan failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -217,7 +419,7 @@ export default function AssetsPage() {
       setScanning(false)
     }
     await loadHoldings()
-  }, [stas?.discovery, loadHoldings])
+  }, [stas?.discovery, stas?.bsv21Discovery, loadHoldings])
 
   useEffect(() => {
     if (!stas?.keyDeriver) return
@@ -246,14 +448,19 @@ export default function AssetsPage() {
   const totalSats = useMemo(() => holdings.reduce((s, o) => s + o.satoshis, 0), [holdings])
 
   const handleGenerateReceive = async () => {
-    if (!stas?.keyDeriver) return
+    if (!stas) return
     setGeneratingReceive(true)
     setReceiveError(null)
     setReceiveCopied(false)
     try {
-      const row = await stas.keyDeriver.createNextReceiveContext()
+      // Dispatch to the protocol-specific deriver. BSV-21 lives in its own
+      // BRC-42 keyspace so the receive-counter never collides with STAS.
+      const deriver =
+        receiveProtocol === 'bsv-21' ? stas.bsv21KeyDeriver : stas.keyDeriver
+      if (!deriver) throw new Error(`no deriver for protocol ${receiveProtocol}`)
+      const row = await deriver.createNextReceiveContext()
       setReceiveAddress(hash160ToAddress(row.ownerFieldHash160))
-      setReceiveLabel(row.keyId)
+      setReceiveLabel(`${protocolLabel(receiveProtocol)} · ${row.keyId}`)
     } catch (e) {
       setReceiveError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -279,11 +486,21 @@ export default function AssetsPage() {
   }
 
   const handleSendConfirm = async () => {
-    if (!sendTarget || !stas?.transfer || !sendTarget.scriptHex || !sendTarget.brc42KeyId) return
+    if (!sendTarget || !stas?.tokens || !sendTarget.scriptHex || !sendTarget.brc42KeyId) return
+    const adapter = stas.tokens.getById(sendTarget.protocol)
+    if (!adapter || !adapter.transferSupported || !adapter.transfer) {
+      setSendResult({
+        ok: false,
+        message: `Send is not yet available for ${protocolLabel(sendTarget.protocol)} in this wallet.`,
+      })
+      return
+    }
     setSending(true)
     setSendResult(null)
     try {
-      const result = await stas.transfer.transfer({
+      // Build the cross-protocol args; for BSV-21 attach the extras the
+      // adapter needs (token id + amounts + display metadata).
+      const baseArgs = {
         source: {
           txid: sendTarget.txid,
           vout: sendTarget.vout,
@@ -292,7 +509,24 @@ export default function AssetsPage() {
           brc42KeyId: sendTarget.brc42KeyId,
         },
         recipientAddress: sendRecipient.trim(),
-      })
+      }
+      let args: any = baseArgs
+      if (sendTarget.protocol === 'bsv-21') {
+        // For BSV-21, the send dialog's amount input is the FULL UTXO
+        // amount today — partial-amount UI is out of scope for the
+        // scaffold. We pass the whole input through; transfer service
+        // will produce no token-change output.
+        const extras: Bsv21SendExtras = {
+          tokenId: sendTarget.tokenId,
+          sourceAmt: sendTarget.tokenAmount,
+          amount: sendTarget.tokenAmount,
+          dec: sendTarget.decimals || undefined,
+          sym: sendTarget.symbol ?? undefined,
+          icon: sendTarget.icon ?? undefined,
+        }
+        args = { ...baseArgs, ...extras }
+      }
+      const result = await adapter.transfer(args)
       if (result.ok) {
         setSendResult({ ok: true, message: `Broadcast ✓ txid=${result.txid}` })
         loadHoldings()
@@ -397,19 +631,33 @@ export default function AssetsPage() {
           >
             <Box>
               <Typography variant='h6' sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <AddCircleOutlineIcon fontSize='small' /> Receive STAS
+                <AddCircleOutlineIcon fontSize='small' /> Receive {protocolLabel(receiveProtocol)}
               </Typography>
               <Typography variant='caption' color='text.secondary'>
                 Generates the next BRC-42 derived receive address. Share with a sender.
               </Typography>
             </Box>
-            <Button
-              variant='contained'
-              onClick={handleGenerateReceive}
-              disabled={generatingReceive}
-            >
-              {generatingReceive ? 'Generating…' : 'Generate new address'}
-            </Button>
+            <Stack direction='row' spacing={1} alignItems='center'>
+              {(['stas', 'bsv-21'] as TokenProtocolId[]).map((p) => (
+                <Button
+                  key={p}
+                  size='small'
+                  variant={receiveProtocol === p ? 'contained' : 'outlined'}
+                  color={receiveProtocol === p ? 'primary' : 'inherit'}
+                  onClick={() => setReceiveProtocol(p)}
+                  disabled={generatingReceive}
+                >
+                  {protocolLabel(p)}
+                </Button>
+              ))}
+              <Button
+                variant='contained'
+                onClick={handleGenerateReceive}
+                disabled={generatingReceive}
+              >
+                {generatingReceive ? 'Generating…' : 'Generate new address'}
+              </Button>
+            </Stack>
           </Stack>
           {receiveError && (
             <Typography variant='caption' color='error' sx={{ display: 'block', mt: 1 }}>
@@ -504,20 +752,43 @@ export default function AssetsPage() {
                     )}
                   </Typography>
                   <Stack direction='row' spacing={1} sx={{ mt: 0.5 }}>
-                    <Chip size='small' label={`${g.totalSatoshis.toLocaleString()} sats`} variant='outlined' />
+                    <Chip
+                      size='small'
+                      label={protocolLabel(g.protocol)}
+                      color={g.protocol === 'stas' ? 'primary' : 'default'}
+                      variant={g.protocol === 'stas' ? 'filled' : 'outlined'}
+                    />
+                    <Chip
+                      size='small'
+                      label={
+                        g.protocol === 'bsv-21'
+                          ? `${formatTokenAmount(g.tokenAmount, g.decimals)} ${g.symbol}`
+                          : `${g.totalSatoshis.toLocaleString()} sats`
+                      }
+                      variant='outlined'
+                    />
                     <Chip
                       size='small'
                       label={`${g.outputCount} ${g.outputCount === 1 ? 'UTXO' : 'UTXOs'}`}
                       variant='outlined'
                     />
-                    {g.spendableSatoshis < g.totalSatoshis && (
-                      <Chip
-                        size='small'
-                        label={`${g.spendableSatoshis.toLocaleString()} spendable`}
-                        variant='outlined'
-                        color='warning'
-                      />
-                    )}
+                    {g.protocol === 'bsv-21'
+                      ? (g.spendableTokenAmount !== g.tokenAmount && (
+                          <Chip
+                            size='small'
+                            label={`${formatTokenAmount(g.spendableTokenAmount, g.decimals)} spendable`}
+                            variant='outlined'
+                            color='warning'
+                          />
+                        ))
+                      : (g.spendableSatoshis < g.totalSatoshis && (
+                          <Chip
+                            size='small'
+                            label={`${g.spendableSatoshis.toLocaleString()} spendable`}
+                            variant='outlined'
+                            color='warning'
+                          />
+                        ))}
                     {g.tokenIds.size > 0 && (
                       <Tooltip title={Array.from(g.tokenIds).join(', ')}>
                         <Chip
@@ -556,7 +827,9 @@ export default function AssetsPage() {
                           variant='body2'
                           sx={{ fontFamily: 'monospace', fontWeight: 600 }}
                         >
-                          {o.satoshis.toLocaleString()} sats
+                          {o.protocol === 'bsv-21'
+                            ? `${formatTokenAmount(o.tokenAmount, o.decimals)} ${o.symbol ?? ''}`
+                            : `${o.satoshis.toLocaleString()} sats`}
                         </Typography>
                         {o.brc42KeyId && (
                           <Chip size='small' label={o.brc42KeyId} variant='outlined' />
@@ -592,18 +865,40 @@ export default function AssetsPage() {
                         owner: {o.ownerAddress}
                       </Typography>
                     </Box>
-                    <Button
-                      size='small'
-                      variant='outlined'
-                      startIcon={<SendIcon fontSize='small' />}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        openSend(o)
-                      }}
-                      disabled={!o.spendable || o.frozen || o.confiscated || !o.scriptHex || !o.brc42KeyId}
-                    >
-                      Send
-                    </Button>
+                    {(() => {
+                      const adapter = stas?.tokens?.getById(o.protocol)
+                      const transferSupported = adapter?.transferSupported ?? false
+                      const sendDisabled =
+                        !o.spendable ||
+                        o.frozen ||
+                        o.confiscated ||
+                        !o.scriptHex ||
+                        !o.brc42KeyId ||
+                        !transferSupported
+                      const tooltip = !transferSupported
+                        ? `Send is not yet available for ${protocolLabel(o.protocol)} in this wallet.`
+                        : ''
+                      const btn = (
+                        <Button
+                          size='small'
+                          variant='outlined'
+                          startIcon={<SendIcon fontSize='small' />}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openSend(o)
+                          }}
+                          disabled={sendDisabled}
+                        >
+                          Send
+                        </Button>
+                      )
+                      return tooltip ? (
+                        <Tooltip title={tooltip}>
+                          {/* span so MUI can attach the tooltip to a disabled button */}
+                          <span>{btn}</span>
+                        </Tooltip>
+                      ) : btn
+                    })()}
                   </Stack>
                 ))}
               </Box>
@@ -667,9 +962,11 @@ export default function AssetsPage() {
                         variant='body2'
                         sx={{ fontFamily: 'monospace', fontWeight: 600 }}
                       >
-                        {o.satoshis.toLocaleString()} sats
+                        {o.protocol === 'bsv-21'
+                          ? `${formatTokenAmount(o.tokenAmount, o.decimals)} ${o.symbol ?? ''}`
+                          : `${o.satoshis.toLocaleString()} sats`}
                       </Typography>
-                      {o.symbol && (
+                      {o.protocol !== 'bsv-21' && o.symbol && (
                         <Chip size='small' label={o.symbol} variant='outlined' />
                       )}
                       {o.brc42KeyId && (
@@ -744,7 +1041,9 @@ export default function AssetsPage() {
                   Sending
                 </Typography>
                 <Typography variant='body1' sx={{ fontWeight: 600 }}>
-                  {sendTarget.satoshis.toLocaleString()} sats · {sendTarget.symbol ?? 'STAS'}
+                  {sendTarget.protocol === 'bsv-21'
+                    ? `${formatTokenAmount(sendTarget.tokenAmount, sendTarget.decimals)} ${sendTarget.symbol ?? ''}`
+                    : `${sendTarget.satoshis.toLocaleString()} sats · ${sendTarget.symbol ?? 'STAS'}`}
                 </Typography>
                 <Typography
                   variant='caption'

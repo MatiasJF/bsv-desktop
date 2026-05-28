@@ -11,6 +11,9 @@
  * knex type dependency.
  */
 
+/** Token-protocol discriminator. Mirrors TokenProtocolId in the renderer. */
+export type TokenProtocolId = 'stas' | 'dstas' | 'bsv-21';
+
 export interface StasTokenRow {
   tokenId: string;
   symbol: string;
@@ -22,6 +25,8 @@ export interface StasTokenRow {
   issuerIdentityKey?: string;
   flagsHex?: string;
   createdAt: string;
+  /** Optional on insert — the column has a DEFAULT 'stas' (migration 0002). */
+  protocol?: TokenProtocolId;
 }
 
 export interface StasOutputRow {
@@ -35,9 +40,25 @@ export interface StasOutputRow {
   serviceFieldsJson?: string;
   createdAt: string;
   updatedAt: string;
+  /** Optional on insert — the column has a DEFAULT 'stas' (migration 0002). */
+  protocol?: TokenProtocolId;
 }
 
 export interface StasReceiveContextRow {
+  profileIdentityKey: string;
+  keyIndex: number;
+  keyId: string;
+  ownerFieldHash160: string;
+  derivedPublicKey: string;
+  createdAt: string;
+}
+
+/**
+ * BSV-21 receive-key row. Schema identical to the STAS variant, but lives
+ * in its own table (`bsv21_receive_contexts`, migration 0003) so the
+ * receive-key namespace and high-water mark stay separate per protocol.
+ */
+export interface Bsv21ReceiveContextRow {
   profileIdentityKey: string;
   keyIndex: number;
   keyId: string;
@@ -96,13 +117,17 @@ export class StasQueries {
     tokenId?: string;
     includeSpent?: boolean;
   } = {}): Promise<any[]> {
+    // `outputs.spentBy` is an integer FK → `transactions.transactionId`, not
+    // a txid string. Join `transactions` so we return the actual spending
+    // txid the UI can render / link to WhatsOnChain. NULL when unspent.
     let q = this.knex('stas_outputs')
       .join('outputs', 'outputs.outputId', 'stas_outputs.outputId')
+      .leftJoin('transactions as spent_tx', 'spent_tx.transactionId', 'outputs.spentBy')
       .select(
         'stas_outputs.*',
         'outputs.satoshis as outputSatoshis',
         'outputs.spendable',
-        'outputs.spentBy',
+        'spent_tx.txid as spentBy',
         'outputs.txid',
         'outputs.vout',
         'outputs.lockingScript' // bytes — converted to hex below for the transfer UI
@@ -146,17 +171,17 @@ export class StasQueries {
   }
 
   /**
-   * Backfill: flip `outputs.spendable=1` on STAS basket outputs that the
-   * wallet still owns. Critical guard: only updates rows where `spentBy
-   * IS NULL` so we don't resurrect already-spent UTXOs.
+   * Backfill: flip `outputs.spendable=1` on the given basket's UTXOs that
+   * the wallet still owns. Critical guard: only updates rows where
+   * `spentBy IS NULL` so we don't resurrect already-spent UTXOs.
    *
-   * Called by StasDiscoveryService.scan to repair the wallet-toolbox
-   * conservative default for any STAS registered before the auto-flip
-   * fix landed.
+   * Generalised in PR-token-adapters so each protocol (STAS, DSTAS,
+   * later BSV-21) can backfill its own basket. `backfillStasSpendable`
+   * stays as a thin wrapper for the STAS basket.
    */
-  async backfillStasSpendable(): Promise<{ updated: number }> {
+  async backfillSpendableForBasket(basketName: string): Promise<{ updated: number }> {
     const basket = await this.knex('output_baskets')
-      .where({ name: 'stas-tokens', isDeleted: 0 })
+      .where({ name: basketName, isDeleted: 0 })
       .first('basketId');
     if (!basket) return { updated: 0 };
     const updated = await this.knex('outputs')
@@ -165,6 +190,15 @@ export class StasQueries {
       .whereNull('spentBy')
       .update({ spendable: 1 });
     return { updated };
+  }
+
+  /**
+   * Back-compat shim — classic-STAS basket backfill. New callers should
+   * use `backfillSpendableForBasket` with the protocol-specific basket
+   * name from `src/lib/constants/baskets`.
+   */
+  async backfillStasSpendable(): Promise<{ updated: number }> {
+    return this.backfillSpendableForBasket('stas-tokens');
   }
 
   /**
@@ -405,6 +439,31 @@ export class StasQueries {
 
   async insertReceiveContext(row: StasReceiveContextRow): Promise<void> {
     await this.knex('stas_receive_contexts').insert(row);
+  }
+
+  // --- BSV-21 receive contexts -------------------------------------------
+  //
+  // Mirror of the STAS receive-context API surface, scoped to its own table
+  // so each protocol's key derivation stays independent.
+
+  async listBsv21ReceiveContexts(
+    profileIdentityKey: string
+  ): Promise<Bsv21ReceiveContextRow[]> {
+    return this.knex('bsv21_receive_contexts')
+      .where({ profileIdentityKey })
+      .orderBy('keyIndex', 'asc');
+  }
+
+  async getBsv21ReceiveHighWaterMark(profileIdentityKey: string): Promise<number> {
+    const row = await this.knex('bsv21_receive_contexts')
+      .where({ profileIdentityKey })
+      .max('keyIndex as m')
+      .first();
+    return (row && row.m) || 0;
+  }
+
+  async insertBsv21ReceiveContext(row: Bsv21ReceiveContextRow): Promise<void> {
+    await this.knex('bsv21_receive_contexts').insert(row);
   }
 
   // --- resync snapshot ----------------------------------------------------

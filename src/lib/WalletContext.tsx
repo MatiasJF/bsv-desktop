@@ -34,7 +34,7 @@ import { buildPermissionModuleRegistry } from './permissionModules/registry'
 import type { PermissionModuleDefinition, PermissionPromptHandler } from './permissionModules/types'
 import type { GroupPermissionRequest, CounterpartyPermissionRequest } from './types/GroupedPermissions'
 import type { WalletProfile } from './types/WalletProfile'
-import { setStasForHttpRoute, setStasTransferEnqueuer } from '../onWalletReady'
+import { setStasForHttpRoute, setStasTransferEnqueuer, setBsv21DiscoveryForHttpRoute } from '../onWalletReady'
 import type { StasTransferRequest } from './types/StasTransferRequest'
 import { RequestInterceptorWallet } from './RequestInterceptorWallet'
 import { updateRecentApp } from './pages/Dashboard/Apps/getApps'
@@ -440,6 +440,12 @@ export const WalletContextProvider: React.FC<WalletContextProps> = ({
     } else {
       setStasForHttpRoute(null)
     }
+
+    // Parallel injection for the BSV-21 register-by-txid demo fast-path.
+    // The primary discovery mechanism is bsv21Discovery.scan() — fired by
+    // the AssetsPage Refresh button — which queries the 1Sat overlay's
+    // per-address SSE stream and covers organic receive end-to-end.
+    setBsv21DiscoveryForHttpRoute(stas?.bsv21Discovery ?? null)
 
     // No cleanup — IPC listener is permanent, wallet ref is swapped not re-registered
   }, [managers?.permissionsManager, activeProfile?.id, onWalletReady])

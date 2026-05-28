@@ -12,6 +12,8 @@
  */
 
 import * as m0001 from './0001_create_stas_tables.js';
+import * as m0002 from './0002_add_protocol_column.js';
+import * as m0003 from './0003_bsv21_receive_contexts.js';
 
 type StasMigration = {
   name: string;
@@ -21,6 +23,8 @@ type StasMigration = {
 
 const migrations: StasMigration[] = [
   { name: '0001_create_stas_tables', up: m0001.up, down: m0001.down },
+  { name: '0002_add_protocol_column', up: m0002.up, down: m0002.down },
+  { name: '0003_bsv21_receive_contexts', up: m0003.up, down: m0003.down },
 ];
 
 /** Knex MigrationSource over the statically-imported STAS migrations. */

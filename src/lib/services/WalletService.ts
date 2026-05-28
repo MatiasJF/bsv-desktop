@@ -46,6 +46,17 @@ import { EventEmittable } from './EventEmittable'
 import { PermissionQueueManager } from './PermissionQueueManager'
 import { PeerPayManager } from './PeerPayManager'
 import { StasKeyDeriver, StasOwnershipService, IndexerClient, StasRegistration, StasDiscoveryService, StasTransferService } from './stas'
+import {
+  TokenProtocolRegistry,
+  StasProtocolAdapter,
+  DstasProtocolAdapter,
+  BSV21ProtocolAdapter,
+  BSV21KeyDeriver,
+  OneSatIndexerClient,
+  BSV21Registration,
+  BSV21TransferService,
+  BSV21DiscoveryService,
+} from './tokens'
 import { StorageElectronIPC } from '../StorageElectronIPC'
 import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
@@ -66,6 +77,18 @@ export type StasServices = {
   ownership: StasOwnershipService
   discovery: StasDiscoveryService
   transfer: StasTransferService
+  /**
+   * Token-protocol adapter registry. Renderers should route transfer
+   * calls through this rather than `transfer` directly — `transfer`
+   * remains exposed for back-compat but only knows classic STAS.
+   */
+  tokens: TokenProtocolRegistry
+  /** BSV-21 key derivation — symmetric counterpart to `keyDeriver` (STAS). */
+  bsv21KeyDeriver: BSV21KeyDeriver
+  /** BSV-21 discovery loop — symmetric counterpart to `discovery` (STAS). */
+  bsv21Discovery: BSV21DiscoveryService
+  /** 1Sat overlay REST client — exposed for diagnostics + the receive UI. */
+  bsv21Indexer: OneSatIndexerClient
 }
 
 export type WalletServiceSnapshot = {
@@ -541,17 +564,51 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       // plus the Task-4 discovery loop (WoC scan -> internalizeAction).
       const stasKeyDeriver = new StasKeyDeriver(wallet, keyDeriver.identityKey, chain)
       const stasRegistration = new StasRegistration(wallet, keyDeriver.identityKey, chain)
+      const stasTransfer = new StasTransferService(wallet, keyDeriver.identityKey, chain)
+
+      // BSV-21 services — separate BRC-42 namespace, 1Sat REST indexer,
+      // standard P2PKH unlock path.
+      const bsv21KeyDeriver = new BSV21KeyDeriver(wallet, keyDeriver.identityKey, chain)
+      const bsv21Indexer = new OneSatIndexerClient({ chain })
+      const bsv21Registration = new BSV21Registration(wallet, keyDeriver.identityKey, chain)
+      const bsv21Transfer = new BSV21TransferService({
+        wallet,
+        identityKey: keyDeriver.identityKey,
+        chain,
+        deriver: bsv21KeyDeriver,
+        indexer: bsv21Indexer,
+      })
+
+      // Token-protocol adapter registry. Order matters: STAS's prefix sniff
+      // is cheap and unambiguous, DSTAS's SDK reader next, BSV-21's ord
+      // envelope last (also cheap but distinct prefix).
+      const tokens = new TokenProtocolRegistry()
+      tokens.register(new StasProtocolAdapter(stasTransfer))
+      tokens.register(new DstasProtocolAdapter())
+      tokens.register(new BSV21ProtocolAdapter(bsv21Transfer))
+
       const stasDiscovery = new StasDiscoveryService({
         deriver: stasKeyDeriver,
         indexer: new IndexerClient(),
         registration: stasRegistration,
+        wallet,
+        registry: tokens,
+      })
+      const bsv21Discovery = new BSV21DiscoveryService({
+        deriver: bsv21KeyDeriver,
+        indexer: bsv21Indexer,
+        registration: bsv21Registration,
         wallet,
       })
       this._stas = {
         keyDeriver: stasKeyDeriver,
         ownership: new StasOwnershipService(stasKeyDeriver),
         discovery: stasDiscovery,
-        transfer: new StasTransferService(wallet, keyDeriver.identityKey, chain),
+        transfer: stasTransfer,
+        tokens,
+        bsv21KeyDeriver,
+        bsv21Discovery,
+        bsv21Indexer,
       }
 
       // Load settings

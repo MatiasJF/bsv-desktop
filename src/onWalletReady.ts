@@ -140,6 +140,22 @@ function parseOrigin(headers: Record<string, string>): string | null {
 let _currentWallet: WalletInterface | null = null;
 let _currentStasDiscovery: any = null;
 /**
+ * BSV-21 discovery service exposed to `/bsv-21/register-by-txid`.
+ *
+ * This is a localhost-only demo fast-path: the dex-shell hands the wallet
+ * a txid right after a faucet mint and the wallet fetches + parses +
+ * internalizes the matching output(s) for immediate UI feedback. It
+ * mirrors `/stas/register-by-txid`.
+ *
+ * The PRIMARY discovery mechanism is `BSV21DiscoveryService.scan()`,
+ * which queries the 1Sat overlay's per-address SSE stream
+ * (`/1sat/owner/{addr}/txos?unspent=true`). That path covers organic
+ * receive (third party sends to one of our addresses) provided the
+ * sender's broadcast routed through any `/1sat/tx`-capable endpoint —
+ * which the faucet now does automatically per-mint.
+ */
+let _currentBsv21Discovery: any = null;
+/**
  * STAS service bundle exposed to the Apps API routes (Task 7a). Set from
  * WalletContext via setStasForHttpRoute as soon as the WalletService's
  * StasServices snapshot becomes available.
@@ -213,6 +229,16 @@ export function setStasForHttpRoute(
   // populated for /stas/register-by-txid even if some callers haven't
   // upgraded yet.
   _currentStasDiscovery = bundle?.discovery ?? null;
+}
+
+/**
+ * Inject (or clear) the BSV-21 discovery service used by the
+ * `/bsv-21/register-by-txid` HTTP route. Mirrors `setStasDiscoveryForHttpRoute`.
+ */
+export function setBsv21DiscoveryForHttpRoute(
+  discovery: { registerByTxid: (txid: string) => Promise<any> } | null
+): void {
+  _currentBsv21Discovery = discovery;
 }
 
 /**
@@ -1257,6 +1283,11 @@ export const onWalletReady = async (
         // discovery.registerByTxid which fetches the rawTx + merkle path,
         // parses, matches owner field to a derived key, and internalizes.
         case '/stas/register-by-txid': {
+          // DEMO-ONLY fast-path. The PRIMARY STAS discovery mechanism is
+          // `StasDiscoveryService.scan()` via Bitails, fired by the
+          // AssetsPage Refresh button + on wallet mount. This route lets
+          // a colocated mint flow (the demo faucet via the dex-shell)
+          // skip the indexer round-trip and get immediate UI feedback.
           try {
             if (!_currentStasDiscovery) {
               response = {
@@ -1276,6 +1307,53 @@ export const onWalletReady = async (
               break;
             }
             const result = await _currentStasDiscovery.registerByTxid(txid);
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify(result),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
+        case '/bsv-21/register-by-txid': {
+          // DEMO-ONLY fast-path. The PRIMARY BSV-21 discovery mechanism
+          // is `BSV21DiscoveryService.scan()` via the 1Sat overlay's
+          // per-address SSE stream. That path covers organic receive —
+          // any sender whose broadcast routes through `/1sat/tx` (the
+          // faucet now does this per-mint) registers their tx with the
+          // overlay's BSV-21 topic-manager, after which the wallet's
+          // per-address sync surfaces the UTXO on Refresh.
+          //
+          // This route exists for immediate UI feedback: a colocated
+          // mint flow (dex-shell after a faucet mint) hands the wallet
+          // the txid and we register the output without waiting for the
+          // next Refresh. Mirror of `/stas/register-by-txid`.
+          try {
+            if (!_currentBsv21Discovery) {
+              response = {
+                request_id: req.request_id,
+                status: 503,
+                body: JSON.stringify({ error: 'BSV-21 discovery service not ready' }),
+              };
+              break;
+            }
+            const { txid } = (req.body ? JSON.parse(req.body) : {}) as { txid?: string };
+            if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/i.test(txid)) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({ error: 'txid (64-hex) is required' }),
+              };
+              break;
+            }
+            const result = await _currentBsv21Discovery.registerByTxid(txid);
             response = {
               request_id: req.request_id,
               status: 200,
