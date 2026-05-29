@@ -25,6 +25,7 @@ import type { WalletInterface } from '@bsv/sdk';
 import { Beef } from '@bsv/sdk';
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv';
 import { BSV21_PROTOCOL_ID, BSV21_COUNTERPARTY } from './constants';
+import { BSV21_BASKET } from '../../../constants/baskets';
 import { buildBsv21Transfer } from './inscription';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { OneSatIndexerClient } from './OneSatIndexerClient';
@@ -169,10 +170,12 @@ export class BSV21TransferService {
     }
 
     let changeHash160Hex: string | undefined;
+    let changeKeyId: string | undefined;
     if (changeAmt > 0n) {
       try {
         const ctx = await deriver.createNextReceiveContext();
         changeHash160Hex = ctx.ownerFieldHash160;
+        changeKeyId = ctx.keyId;
       } catch (err) {
         return { ok: false, reason: `derive change key: ${errMsg(err)}` };
       }
@@ -222,6 +225,20 @@ export class BSV21TransferService {
     }
 
     // 6. createAction. The wallet auto-funds BSV and adds standard change.
+    //
+    // The recipient output stays external — wallet-toolbox should NOT add
+    // it to any basket. The token-change output, by contrast, goes back to
+    // a wallet-derived BSV-21 address (see step 3 — `changeHash160Hex`
+    // comes from `deriver.createNextReceiveContext()`), so we declare its
+    // `basket` + `customInstructions` + `tags` here. Without these,
+    // createAction creates the on-chain output but leaves
+    // `outputs.basketId = NULL` in the SQL row, which means the user
+    // permanently loses sight of their change tokens — the AssetsPage
+    // basket query never returns them.
+    //
+    // The shape mirrors `BSV21Registration.register()`'s internalize call
+    // so listOutputs(bsv-21-tokens) returns identical row metadata for
+    // organic-discovery and self-change paths.
     const outputs: any[] = [
       {
         lockingScript: destScriptHex,
@@ -229,11 +246,34 @@ export class BSV21TransferService {
         outputDescription: 'BSV-21 to recipient',
       },
     ];
-    if (changeScriptHex) {
+    if (changeScriptHex && changeHash160Hex && changeKeyId) {
+      // Owner address for the customInstructions.
+      let changeOwnerAddress: string;
+      try {
+        changeOwnerAddress = new (Address as any)(fromHex(changeHash160Hex)).Value as string;
+      } catch {
+        changeOwnerAddress = '';
+      }
+      const changeCustomInstructions = JSON.stringify({
+        kind: 'bsv-21',
+        protocolID: BSV21_PROTOCOL_ID,
+        keyID: changeKeyId,
+        counterparty: BSV21_COUNTERPARTY,
+        tokenId: canonicalTokenId,
+        ownerAddress: changeOwnerAddress,
+      });
+      const changeTags: string[] = ['bsv21', `id:${canonicalTokenId}`, `amt:${changeAmt.toString()}`];
+      if (source.dec !== undefined) changeTags.push(`dec:${source.dec}`);
+      if (source.sym) changeTags.push(`sym:${source.sym}`);
+      if (source.icon) changeTags.push(`icon:${source.icon}`);
+
       outputs.push({
         lockingScript: changeScriptHex,
         satoshis: 1,
         outputDescription: 'BSV-21 token change',
+        basket: BSV21_BASKET,
+        customInstructions: changeCustomInstructions,
+        tags: changeTags,
       });
     }
 
