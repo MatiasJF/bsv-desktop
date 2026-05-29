@@ -85,6 +85,18 @@ export interface StasDiscoveryDeps {
    * decides the protocol + basket the UTXO is registered under.
    */
   registry: TokenProtocolRegistry;
+  /**
+   * Optional relay client. When set, `scan()` polls the relay alongside
+   * the Bitails STAS scan and registers any txids it returns through the
+   * same registry-dispatched flow. Closes the organic-receive gap for
+   * DSTAS (no public indexer) and for any future protocol that Bitails
+   * doesn't cover. STAS / DSTAS share the BRC-42 namespace, so polling
+   * the same derived-address gap covers both.
+   *
+   * Fail-soft: if the relay is unreachable, the scan continues without
+   * the relay-assist — a relay outage doesn't break discovery.
+   */
+  relay?: import('../relay/RelayClient').RelayClient;
   gapLimit?: number;
 }
 
@@ -371,6 +383,58 @@ export class StasDiscoveryService {
           const message = err instanceof Error ? err.message : String(err);
           result.errors.push({ txid: utxo.txid, vout: utxo.vout, message });
         }
+      }
+    }
+
+    // 5. Relay-assisted discovery (for protocols Bitails doesn't cover —
+    //    primarily DSTAS, optionally BSV-21 inactive transfers).
+    //
+    //    The relay is a stateless mailbox keyed on recipient address.
+    //    Senders push (txid, addr, protocol) post-broadcast; here we pull
+    //    for every derived address in the gap and pipe the returned txids
+    //    through the same `registerByTxid` path. Idempotency is enforced
+    //    by `registration.register` (it bails on already-known outpoints),
+    //    so re-pulling the same txid on repeat scans is cheap.
+    //
+    //    Fail-soft: a relay outage or missing config just skips this step
+    //    silently. The Bitails-found UTXOs above were already registered.
+    if (this.deps.relay && addresses.length > 0) {
+      try {
+        const grouped = await this.deps.relay.pullMulti(addresses);
+        if (grouped) {
+          const seenTxids = new Set<string>();
+          for (const entries of grouped.values()) {
+            for (const e of entries) {
+              if (seenTxids.has(e.txid)) continue;
+              seenTxids.add(e.txid);
+              try {
+                const res = await this.registerByTxid(e.txid);
+                if (res.error) {
+                  result.errors.push({ message: `relay txid ${e.txid.slice(0, 16)}…: ${res.error}` });
+                  continue;
+                }
+                result.candidates += res.outputs.length;
+                for (const o of res.outputs) {
+                  if (!o.matched) continue;
+                  result.dstas++;
+                  result.ownedAndDstas++;
+                  if (o.ok) result.registered++;
+                  else if (o.reason === 'already registered') result.skippedAlreadyKnown++;
+                }
+              } catch (err) {
+                result.errors.push({
+                  message: `relay register ${e.txid.slice(0, 16)}…: ${err instanceof Error ? err.message : String(err)}`,
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        // Pull or registration loop failed wholesale — swallow, since the
+        // relay is best-effort and the bitails-found UTXOs are already in.
+        result.errors.push({
+          message: `relay scan: ${err instanceof Error ? err.message : String(err)}`,
+        });
       }
     }
 

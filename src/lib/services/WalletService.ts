@@ -594,12 +594,26 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       tokens.register(new DstasProtocolAdapter(dstasTransfer))
       tokens.register(new BSV21ProtocolAdapter(bsv21Transfer))
 
+      // Optional relay-assisted discovery. The relay closes the
+      // organic-receive gap for protocols Bitails doesn't cover (DSTAS;
+      // optionally BSV-21 inactive transfers). Default URL is the local
+      // demo deployment; override via `RELAY_URL` env var. Setting
+      // `RELAY_URL` to an empty string disables the integration entirely.
+      const relayUrlEnv = (import.meta as any).env?.VITE_RELAY_URL as
+        | string
+        | undefined
+      const relayUrl = relayUrlEnv !== undefined ? relayUrlEnv : 'http://127.0.0.1:8081'
+      const relay = relayUrl
+        ? new (await import('./relay/RelayClient')).RelayClient({ baseUrl: relayUrl })
+        : undefined
+
       const stasDiscovery = new StasDiscoveryService({
         deriver: stasKeyDeriver,
         indexer: new IndexerClient(),
         registration: stasRegistration,
         wallet,
         registry: tokens,
+        relay,
       })
       const bsv21Discovery = new BSV21DiscoveryService({
         deriver: bsv21KeyDeriver,
