@@ -418,6 +418,96 @@ export class StasQueries {
       .update({ tokenId: args.tokenId, updatedAt: now });
   }
 
+  /**
+   * Retroactively assign a basket + customInstructions + tags to an
+   * existing output. Used for BSV-21 orphan recovery — pre-fix sends
+   * produced change outputs in the `outputs` table with `basketId = NULL`
+   * (the toolbox doesn't recognise the token template, so the
+   * createAction output never claimed a basket). The recovery flow
+   * re-classifies them after the fact.
+   *
+   * Idempotent: if the output already has a basket, returns without
+   * modifying it. The output's `userId` is read from the existing row,
+   * so we never have to guess which user the tags belong to.
+   *
+   * Returns the outputId on success so the caller can log it. Reason
+   * field surfaces lookup misses without throwing.
+   */
+  async recoverOrphanOutput(args: {
+    txid: string;
+    vout: number;
+    customInstructions: string;
+    tags: string[];
+    basketName: string;
+  }): Promise<{
+    ok: boolean;
+    outputId?: number;
+    alreadyHadBasket?: boolean;
+    reason?: string;
+  }> {
+    const row = await this.knex('outputs')
+      .where({ txid: args.txid, vout: args.vout })
+      .first('outputId', 'userId', 'basketId');
+    if (!row) {
+      return { ok: false, reason: `no outputs row matches ${args.txid}:${args.vout}` };
+    }
+    const { outputId, userId, basketId } = row;
+    if (basketId) {
+      return { ok: true, outputId, alreadyHadBasket: true };
+    }
+
+    const basket = await this.knex('output_baskets')
+      .where({ name: args.basketName, isDeleted: 0 })
+      .first('basketId');
+    if (!basket) {
+      // Defensive — the basket should exist already, since the wallet
+      // creates it on first BSV-21 internalize. If it doesn't, surface
+      // the gap rather than silently creating an orphan basket row.
+      return { ok: false, outputId, reason: `basket "${args.basketName}" not found — has it ever been used?` };
+    }
+
+    await this.knex('outputs')
+      .where({ outputId })
+      .update({
+        basketId: basket.basketId,
+        customInstructions: args.customInstructions,
+        spendable: true,
+      });
+
+    const now = new Date().toISOString();
+    for (const tag of args.tags) {
+      let tagRow = await this.knex('output_tags')
+        .where({ tag, userId })
+        .first('outputTagId');
+      if (!tagRow) {
+        const [outputTagId] = await this.knex('output_tags').insert({
+          tag,
+          userId,
+          isDeleted: false,
+          created_at: now,
+          updated_at: now,
+        });
+        tagRow = { outputTagId };
+      }
+      // output_tags_map UNIQUE on (outputTagId, outputId) — use raw INSERT
+      // OR IGNORE so repeated calls are safe.
+      const existing = await this.knex('output_tags_map')
+        .where({ outputTagId: tagRow.outputTagId, outputId })
+        .first();
+      if (!existing) {
+        await this.knex('output_tags_map').insert({
+          outputTagId: tagRow.outputTagId,
+          outputId,
+          isDeleted: false,
+          created_at: now,
+          updated_at: now,
+        });
+      }
+    }
+
+    return { ok: true, outputId };
+  }
+
   // --- receive contexts ---------------------------------------------------
 
   async listReceiveContexts(

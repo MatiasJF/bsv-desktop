@@ -296,6 +296,16 @@ export default function AssetsPage() {
   const [sending, setSending] = useState(false)
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
 
+  // BSV-21 orphan recovery — pre-PR-32 sends produced change outputs
+  // without basket+customInstructions+tags, so they don't show up in
+  // the holdings list. This dialog lets a user re-internalize one by
+  // outpoint after the fix shipped.
+  const [recoverDialogOpen, setRecoverDialogOpen] = useState(false)
+  const [recoverTxid, setRecoverTxid] = useState('')
+  const [recoverVout, setRecoverVout] = useState('')
+  const [recovering, setRecovering] = useState(false)
+  const [recoverResult, setRecoverResult] = useState<{ ok: boolean; message: string } | null>(null)
+
   // Filter state — applied to groups by symbol, name, or tokenId.
   const [filter, setFilter] = useState('')
 
@@ -441,6 +451,50 @@ export default function AssetsPage() {
     handleScan()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stas?.keyDeriver])
+
+  const handleRecoverOrphan = useCallback(async () => {
+    if (!stas?.bsv21Discovery || !identityKey || !chain) {
+      setRecoverResult({ ok: false, message: 'discovery service or identity not ready' })
+      return
+    }
+    const txid = recoverTxid.trim().toLowerCase()
+    const voutNum = Number(recoverVout.trim())
+    if (!/^[0-9a-f]{64}$/.test(txid)) {
+      setRecoverResult({ ok: false, message: 'txid must be 64 hex chars' })
+      return
+    }
+    if (!Number.isInteger(voutNum) || voutNum < 0) {
+      setRecoverResult({ ok: false, message: 'vout must be a non-negative integer' })
+      return
+    }
+    setRecovering(true)
+    setRecoverResult(null)
+    try {
+      const res = await (stas.bsv21Discovery as any).recoverByOutpoint({
+        txid,
+        vout: voutNum,
+        identityKey,
+        chain,
+      })
+      if (res.ok) {
+        if (res.alreadyHadBasket) {
+          setRecoverResult({ ok: true, message: `Already recovered (outputId ${res.outputId}). No-op.` })
+        } else {
+          setRecoverResult({
+            ok: true,
+            message: `Recovered outputId ${res.outputId} (token ${res.tokenId?.slice(0, 12)}…, key recv ${res.keyIndex})`,
+          })
+        }
+        await loadHoldings()
+      } else {
+        setRecoverResult({ ok: false, message: res.reason ?? 'recovery failed' })
+      }
+    } catch (e) {
+      setRecoverResult({ ok: false, message: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setRecovering(false)
+    }
+  }, [stas?.bsv21Discovery, identityKey, chain, recoverTxid, recoverVout, loadHoldings])
 
   const allGroups = useMemo(() => groupByToken(holdings), [holdings])
 
@@ -636,15 +690,28 @@ export default function AssetsPage() {
               />
             </Box>
             <Stack spacing={1} alignItems='flex-end'>
-              <Button
-                size='small'
-                variant='outlined'
-                startIcon={(loading || scanning) ? <CircularProgress size={14} /> : <RefreshIcon />}
-                onClick={handleScan}
-                disabled={loading || scanning}
-              >
-                {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Scan for STAS'}
-              </Button>
+              <Stack direction='row' spacing={1}>
+                <Button
+                  size='small'
+                  variant='text'
+                  onClick={() => {
+                    setRecoverResult(null)
+                    setRecoverDialogOpen(true)
+                  }}
+                  disabled={loading || scanning}
+                >
+                  Recover orphan
+                </Button>
+                <Button
+                  size='small'
+                  variant='outlined'
+                  startIcon={(loading || scanning) ? <CircularProgress size={14} /> : <RefreshIcon />}
+                  onClick={handleScan}
+                  disabled={loading || scanning}
+                >
+                  {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Scan for STAS'}
+                </Button>
+              </Stack>
               {scanSummary && (
                 <Typography variant='caption' color='text.secondary' sx={{ maxWidth: 240, textAlign: 'right' }}>
                   {scanSummary}
@@ -1156,6 +1223,72 @@ export default function AssetsPage() {
             disabled={sending || !sendRecipient.trim() || sendResult?.ok}
           >
             {sending ? 'Sending…' : 'Send'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={recoverDialogOpen}
+        onClose={() => !recovering && setRecoverDialogOpen(false)}
+        maxWidth='sm'
+        fullWidth
+      >
+        <DialogTitle>Recover orphaned BSV-21 output</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Typography variant='body2' color='text.secondary'>
+              Pre-fix BSV-21 sends produced change outputs that landed in the wallet's
+              outputs table but were not assigned to the bsv-21-tokens basket, so they
+              don't show up in your holdings. Enter the outpoint to reassign it
+              retroactively. Idempotent — re-running on a recovered output is a no-op.
+            </Typography>
+            <TextField
+              size='small'
+              label='Transaction ID'
+              placeholder='64 hex chars'
+              value={recoverTxid}
+              onChange={(e) => setRecoverTxid(e.target.value)}
+              disabled={recovering}
+              fullWidth
+            />
+            <TextField
+              size='small'
+              label='Vout'
+              placeholder='non-negative integer'
+              value={recoverVout}
+              onChange={(e) => setRecoverVout(e.target.value)}
+              disabled={recovering}
+              fullWidth
+            />
+            {recoverResult && (
+              <Typography
+                variant='body2'
+                color={recoverResult.ok ? 'success.main' : 'error'}
+                sx={{ wordBreak: 'break-all' }}
+              >
+                {recoverResult.message}
+              </Typography>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setRecoverDialogOpen(false)
+              setRecoverTxid('')
+              setRecoverVout('')
+              setRecoverResult(null)
+            }}
+            disabled={recovering}
+          >
+            Close
+          </Button>
+          <Button
+            variant='contained'
+            onClick={handleRecoverOrphan}
+            disabled={recovering || !recoverTxid.trim() || !recoverVout.trim()}
+          >
+            {recovering ? 'Recovering…' : 'Recover'}
           </Button>
         </DialogActions>
       </Dialog>

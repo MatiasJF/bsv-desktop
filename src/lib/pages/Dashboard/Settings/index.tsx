@@ -32,6 +32,7 @@ import { UserContext } from '../../../UserContext.js'
 import PageLoading from '../../../components/PageLoading.js'
 import MessageBoxConfig from '../../../components/MessageBoxConfig/index.tsx'
 import WalletDiagnosis from './WalletDiagnosis.tsx'
+import { getStoredRelayUrl, setRelayUrl, DEFAULT_RELAY_URL_CONST } from '../../../services/relay/relayUrl'
 const useStyles = makeStyles((theme: Theme) => ({
   root: {
     padding: theme.spacing(3),
@@ -102,6 +103,10 @@ const Settings = () => {
   // Permissions configuration state
   const [localPermissionsConfig, setLocalPermissionsConfig] = useState(permissionsConfig)
   const [permissionsExpanded, setPermissionsExpanded] = useState(false)
+
+  // Token-relay configuration. The relay only takes effect at wallet init,
+  // so editing it requires a reload — same UX as backup storage URLs.
+  const [relayUrlInput, setRelayUrlInput] = useState<string>(getStoredRelayUrl() ?? '')
 
   useEffect(() => {
     setLocalPermissionsConfig(permissionsConfig)
@@ -358,6 +363,20 @@ const Settings = () => {
 
   const handleReloadApp = () => {
     window.location.reload()
+  }
+
+  const handleSaveRelayUrl = () => {
+    // Empty string is a valid choice — explicitly disables the relay.
+    // Null clears the stored override (falls back to env / default).
+    const trimmed = relayUrlInput.trim()
+    setRelayUrl(trimmed === DEFAULT_RELAY_URL_CONST ? null : trimmed)
+    toast.success('Relay URL saved — reload required for changes to take effect.')
+  }
+
+  const handleResetRelayUrl = () => {
+    setRelayUrl(null)
+    setRelayUrlInput('')
+    toast.success('Relay URL cleared — using default on next reload.')
   }
 
   const renderThemeIcon = (themeType) => {
@@ -650,6 +669,47 @@ const Settings = () => {
       <Box sx={{ my: 3 }}>
         <MessageBoxConfig />
       </Box>
+
+      <Paper elevation={0} className={classes.section} sx={{ p: 3, bgcolor: 'background.paper' }}>
+        <Typography variant="h4" sx={{ mb: 2 }}>
+          Token Relay
+        </Typography>
+        <Typography variant="body1" color="textSecondary" sx={{ mb: 1 }}>
+          Bridge for organic-receive discovery of tokens without public indexers
+          (DSTAS, and unactivated BSV-21 transfers). When set, sending wallets
+          push the recipient address + txid here after broadcast; receiving
+          wallets poll per derived address during their scan. Leave the input
+          empty to disable. Changes take effect on the next wallet reload.
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mt: 2 }}>
+          <TextField
+            fullWidth
+            size="small"
+            label="Relay URL"
+            placeholder={DEFAULT_RELAY_URL_CONST}
+            value={relayUrlInput}
+            onChange={(e) => setRelayUrlInput(e.target.value)}
+            helperText={
+              getStoredRelayUrl() === null
+                ? `Currently using default: ${DEFAULT_RELAY_URL_CONST}`
+                : getStoredRelayUrl() === ''
+                  ? 'Relay disabled by user override.'
+                  : `Currently using override: ${getStoredRelayUrl()}`
+            }
+          />
+        </Box>
+        <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+          <Button variant="contained" onClick={handleSaveRelayUrl}>
+            Save
+          </Button>
+          <Button variant="outlined" onClick={handleResetRelayUrl}>
+            Reset to default
+          </Button>
+          <Button variant="outlined" color="secondary" onClick={handleReloadApp}>
+            Reload wallet
+          </Button>
+        </Box>
+      </Paper>
 
       <Dialog open={showBackupDialog} onClose={() => setShowBackupDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{t('backup_dialog_title')}</DialogTitle>

@@ -177,6 +177,148 @@ export class BSV21DiscoveryService {
     return out;
   }
 
+  /**
+   * Recover a pre-fix orphaned BSV-21 output by outpoint.
+   *
+   * Pre-PR-32 BSV-21 sends produced change outputs that landed in the
+   * `outputs` table without a basket assignment (the wallet did not
+   * declare basket+customInstructions+tags on the change output). Those
+   * UTXOs are unspendable because AssetsPage queries by basket and
+   * the registration path's idempotency check skips them.
+   *
+   * This recovery flow:
+   *   1. Fetch the parent tx via getRawTx
+   *   2. Parse the specific output's locking script
+   *   3. Match ownerHash160 against derived BRC-42 keys (proves ownership)
+   *   4. Call the SQL recovery method to retroactively assign basket,
+   *      customInstructions, tags, and spendable=true
+   *
+   * Idempotent — already-recovered outputs return ok=true with
+   * `alreadyHadBasket: true`.
+   *
+   * Returns a structured result so the UI can render success/failure
+   * without surfacing exceptions.
+   */
+  async recoverByOutpoint(args: {
+    txid: string;
+    vout: number;
+    identityKey: string;
+    chain: 'main' | 'test';
+  }): Promise<{
+    ok: boolean;
+    outputId?: number;
+    keyIndex?: number;
+    tokenId?: string;
+    alreadyHadBasket?: boolean;
+    reason?: string;
+  }> {
+    const services: any = (this.deps.wallet as any).getServices?.();
+    if (!services) {
+      return { ok: false, reason: 'wallet.getServices() unavailable' };
+    }
+
+    let rawTxRes: any;
+    try {
+      rawTxRes = await services.getRawTx(args.txid);
+    } catch (err) {
+      return { ok: false, reason: `getRawTx failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!rawTxRes?.rawTx) {
+      return { ok: false, reason: rawTxRes?.error?.message ?? 'getRawTx returned no rawTx' };
+    }
+
+    let tx: any;
+    try {
+      tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
+    } catch (err) {
+      return { ok: false, reason: `tx parse failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (args.vout < 0 || args.vout >= tx.outputs.length) {
+      return { ok: false, reason: `vout ${args.vout} out of range (tx has ${tx.outputs.length} outputs)` };
+    }
+
+    const scriptHex: string = tx.outputs[args.vout].lockingScript.toHex();
+    const parsed = parseBsv21LockingScript(scriptHex);
+    if (!parsed) {
+      return { ok: false, reason: 'output does not parse as BSV-21' };
+    }
+
+    // Walk derived keys — same shape registerByTxid uses. Gap-limit
+    // applies; if the output was sent to a key past the current high
+    // water mark we don't find it.
+    const hwm = await this.deps.deriver.getHighWaterMark();
+    const gap = this.deps.gapLimit ?? BSV21_GAP_LIMIT;
+    const ownerMap = await this.deps.deriver.enumerateOwnerFields(
+      hwm > 0 ? hwm + gap : Math.min(gap, 5)
+    );
+    const keyIndex = ownerMap.get(parsed.ownerHash160);
+    if (keyIndex === undefined) {
+      return {
+        ok: false,
+        reason: `owner hash160 ${parsed.ownerHash160} does not match any derived BRC-42 key within gap ${gap}`,
+      };
+    }
+
+    // Deploy+mint payloads carry no `id` — outpoint underscore form
+    // IS the tokenId. Transfer payloads (the change-output case)
+    // carry the original tokenId.
+    const tokenId = parsed.id || `${args.txid}_${args.vout}`;
+
+    // Mirror BSV21Registration.register's customInstructions + tags
+    // exactly, so a recovered output looks identical to a freshly-
+    // registered one (same UI surface, same spend-time unlock recipe).
+    const ownerAddress = hash160ToAddress(parsed.ownerHash160);
+    const customInstructions = JSON.stringify({
+      kind: 'bsv-21',
+      protocolID: ['2', 'bsv-21'],
+      keyID: `recv ${keyIndex}`,
+      counterparty: 'self',
+      tokenId,
+      ownerAddress,
+    });
+
+    const tags: string[] = ['bsv21', `id:${tokenId}`, `amt:${parsed.amt}`];
+    if (parsed.dec !== undefined) tags.push(`dec:${parsed.dec}`);
+    if (parsed.sym) tags.push(`sym:${parsed.sym}`);
+    if (parsed.icon) tags.push(`icon:${parsed.icon}`);
+
+    // Dispatch via the stas-query IPC channel to the SQL recovery method.
+    // We don't go through internalizeAction because the output is already
+    // in the `outputs` table — re-internalizing would either fail or
+    // create a duplicate row.
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI?.stas : undefined;
+    if (!api) {
+      return { ok: false, reason: 'STAS query channel unavailable' };
+    }
+    const res = await api.query(args.identityKey, args.chain, 'recoverOrphanOutput', [
+      {
+        txid: args.txid,
+        vout: args.vout,
+        customInstructions,
+        tags,
+        basketName: 'bsv-21-tokens',
+      },
+    ]);
+    if (!res || !res.success) {
+      return { ok: false, reason: `recoverOrphanOutput query failed: ${res?.error ?? 'unknown'}` };
+    }
+    const sqlRes = res.result as {
+      ok: boolean;
+      outputId?: number;
+      alreadyHadBasket?: boolean;
+      reason?: string;
+    };
+
+    return {
+      ok: sqlRes.ok,
+      outputId: sqlRes.outputId,
+      alreadyHadBasket: sqlRes.alreadyHadBasket,
+      keyIndex,
+      tokenId,
+      reason: sqlRes.reason,
+    };
+  }
+
   async scan(): Promise<Bsv21ScanResult> {
     const result: Bsv21ScanResult = {
       scannedAddresses: 0,

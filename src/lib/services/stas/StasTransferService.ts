@@ -112,7 +112,7 @@ export class StasTransferService {
     if (!sh.startsWith('76a914')) {
       return {
         ok: false,
-        reason: `source isn't a classic STAS script — prefix is "${sh.substring(0, 20)}…". DSTAS send isn't supported by the wallet yet; pick a classic STAS UTXO.`,
+        reason: `source isn't a classic STAS script — prefix is "${sh.substring(0, 20)}…". For DSTAS UTXOs the dispatch should route via DstasTransferService — if you reached this branch, the protocol-aware dispatch upstream is bypassed.`,
       };
     }
     if (sh.substring(46, 52) !== '88ac69') {

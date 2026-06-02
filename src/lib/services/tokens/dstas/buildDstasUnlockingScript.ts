@@ -107,25 +107,28 @@ function pushBytes(payload: Uint8Array): Uint8Array {
 }
 
 /**
- * Bitcoin ScriptNum (CScriptNum) encoding for non-negative integers — what
- * the SDK's `ScriptBuilder.addNumber` emits and what `OP_PICK` / `OP_ROLL`
- * etc. expect. Important: this is NOT the same as `pushBytes(uint64LE)` —
- * ScriptNum uses minimal little-endian with a sign bit on the MSB.
+ * Bitcoin ScriptNum encoding for non-negative integers, matching the
+ * SDK's `ScriptBuilder.addNumber` exactly:
  *
- *   0 → empty push (length 0 means OP_0)
- *   1..16 → push the byte; some impls use OP_1..OP_16 single-opcode, but
- *           our match target is what the SDK emits; the SDK's
- *           `ScriptBuilder.addNumber` uses a length-prefixed push of the
- *           magnitude bytes. For 1..16 that's `01 <n>` which is also a
- *           valid ScriptNum push.
+ *   0      → OP_0 (single byte 0x00, empty stack push)
+ *   1..16  → OP_1..OP_16 (single bytes 0x51..0x60)
+ *   17+    → length-prefixed minimal LE magnitude bytes
  *
- * For values larger than 0x7f the high bit triggers a sign byte — we
- * append `0x00` to keep the value positive.
+ * The 1..16 special case is REQUIRED by BSV post-Genesis: the script
+ * evaluator enforces minimal push encoding and rejects `01 NN` for
+ * NN ∈ {1..16} as "data not minimally encoded". The bug previously
+ * surfaced as a DSTAS unlock failure when fundingVout ∈ {1..16} or
+ * spendingType=1 was pushed via the data-push form.
+ *
+ * For values > 0x7f the high bit triggers a sign byte — we append
+ * `0x00` to keep the value positive (CScriptNum convention).
  */
 function scriptNumPush(n: number | bigint): Uint8Array {
   const value = typeof n === 'bigint' ? n : BigInt(n)
-  if (value === 0n) return new Uint8Array([0x00]) // OP_0 (empty push)
+  if (value === 0n) return new Uint8Array([0x00]) // OP_0
   if (value < 0n) throw new Error('scriptNumPush: negative numbers not supported here')
+  // OP_1 (0x51) through OP_16 (0x60). Mandatory for minimality.
+  if (value <= 16n) return new Uint8Array([0x50 + Number(value)])
 
   // Minimal little-endian magnitude bytes.
   let v = value

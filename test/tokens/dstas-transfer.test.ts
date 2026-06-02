@@ -169,16 +169,87 @@ describe('buildDstasUnlockingScript — DSTAS regular-spend witness', () => {
     //   - the preimage bytes (pushed somewhere mid-script)
     //   - the sig + sighash type byte (0x41) appended
     //   - the pubkey
-    //   - the spending type byte (0x01 — single-byte push)
     //   - the funding outpoint's reversed txid (`22` repeating)
     const sigWithType = toHex(fakeSig) + '41'
     expect(hex).toContain(sigWithType)
     expect(hex).toContain(toHex(fakePub))
     expect(hex).toContain(toHex(fakePreimage))
-    // Spending type 1 is encoded as a single-byte push: '01' '01'
-    expect(hex).toContain('0101')
     // Reversed funding txid '22' repeated.
     expect(hex).toContain('2022' + '22'.repeat(31))
+  })
+
+  test('emits OP_1..OP_16 for small-integer pushes (BSV minimality)', async () => {
+    // Regression for the production bug surfaced by the script evaluator
+    // ("data is not minimally encoded. PC: 6") on the first DSTAS send.
+    // scriptNumPush(1..16) must emit OP_1..OP_16 (0x51..0x60), NOT the
+    // data-push form `01 NN`.
+    //
+    // We walk the unlock script's push opcodes by length-decoding from
+    // the front and verify the funding-vout / spending-type slots —
+    // which fall at known positions in the SDK's layout — are OP_1 (0x51),
+    // not the non-minimal `01 01` form.
+    const { tx } = await makeUnsignedTx() // funding vout = 1, spending type = 1
+    const fakeSig = new Uint8Array(72)
+    const fakePub = new Uint8Array(33)
+    fakePub[0] = 0x02
+    const hex = buildDstasUnlockingScript({
+      unsignedTx: tx,
+      inputIdx: 0,
+      fundingInputIdx: 1,
+      preimage: new Uint8Array(20),
+      signatureDer: fakeSig,
+      publicKey: fakePub,
+      spendingType: 1,
+    })
+    const bytes = new Uint8Array(hex.match(/.{2}/g)!.map((b) => parseInt(b, 16)))
+
+    // Walk pushes by opcode-decoding. For each, capture the opcode + payload.
+    type Push = { opcode: number; payloadLen: number; offset: number }
+    const pushes: Push[] = []
+    let i = 0
+    while (i < bytes.length) {
+      const op = bytes[i]
+      if (op === 0x00) {
+        pushes.push({ opcode: op, payloadLen: 0, offset: i })
+        i += 1
+      } else if (op >= 0x51 && op <= 0x60) {
+        // OP_1 .. OP_16 — single-byte numeric push, no payload.
+        pushes.push({ opcode: op, payloadLen: 0, offset: i })
+        i += 1
+      } else if (op >= 0x01 && op <= 0x4b) {
+        // Direct push of N bytes.
+        pushes.push({ opcode: op, payloadLen: op, offset: i })
+        i += 1 + op
+      } else if (op === 0x4c) {
+        // OP_PUSHDATA1.
+        const len = bytes[i + 1]
+        pushes.push({ opcode: op, payloadLen: len, offset: i })
+        i += 2 + len
+      } else if (op === 0x4d) {
+        const len = bytes[i + 1] | (bytes[i + 2] << 8)
+        pushes.push({ opcode: op, payloadLen: len, offset: i })
+        i += 3 + len
+      } else {
+        throw new Error(`Unexpected opcode 0x${op.toString(16)} at offset ${i}`)
+      }
+    }
+
+    // Per SDK layout for our makeUnsignedTx fixture (2 outputs, funding vout=1):
+    //   push 0: sats(100=0x64) — direct push `01 64`
+    //   push 1: recipient pkh (20 bytes)
+    //   push 2: action-data OP_0
+    //   push 3: change sats (800)
+    //   push 4: change pkh (20 bytes)
+    //   push 5: OP_0 (no null-data)
+    //   push 6: funding vout (=1) ← MUST be OP_1 (0x51), not `01 01`
+    //   push 7: reversed funding txid (32 bytes)
+    //   push 8: OP_0 (not merge)
+    //   push 9: preimage (20 bytes)
+    //   push 10: spending type (=1) ← MUST be OP_1 (0x51), not `01 01`
+    //   push 11: sig
+    //   push 12: pubkey
+    expect(pushes[6].opcode).toBe(0x51) // funding vout = OP_1 minimal
+    expect(pushes[10].opcode).toBe(0x51) // spending type = OP_1 minimal
   })
 
   test('emits OP_0 OP_0 when there is no P2PKH change output', async () => {

@@ -39,6 +39,7 @@ import { parseDstasLockingScript } from '../../stas/dstasParser'
 import { stasQuery } from '../../stas/stasIpc'
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef'
 import { buildDstasUnlockingScript, DSTAS_SIGHASH_TYPE } from './buildDstasUnlockingScript'
+import type { RelayClient } from '../../relay/RelayClient'
 
 /**
  * Dynamic bsv-js import — same pattern StasTransferService uses.
@@ -74,7 +75,17 @@ export class DstasTransferService {
   constructor(
     private readonly wallet: WalletInterface,
     private readonly identityKey: string,
-    private readonly chain: 'main' | 'test'
+    private readonly chain: 'main' | 'test',
+    /**
+     * Optional stas-relay client for organic-receive bridging. When set,
+     * the service pushes `(txid, recipientAddress, 'dstas')` after
+     * broadcast so a remote recipient's wallet can discover the send
+     * during its next scan without needing colocated
+     * `/stas/register-by-txid` access. Bitails's STAS-aware matcher does
+     * NOT recognise DSTAS template scripts, so the relay is the primary
+     * discovery channel for DSTAS receives.
+     */
+    private readonly relay?: RelayClient
   ) {}
 
   async transfer(args: DstasTransferArgs): Promise<DstasTransferResult> {
@@ -275,18 +286,64 @@ export class DstasTransferService {
         return { ok: false, reason: `parse signable tx: ${errMsg(err)}` }
       }
 
-      // 10. Resolve the funding input. wallet-toolbox always adds one
-      //     BSV-funding input; the DSTAS template encodes its outpoint
-      //     into the unlock witness. We pick the first non-DSTAS input.
-      let fundingInputIdx = -1
+      // 10. Resolve the funding input. The DSTAS template encodes EXACTLY
+      //     ONE funding outpoint (vout + txid) into the unlock witness;
+      //     the template verifies this matches the tx's prevout hash.
+      //     wallet-toolbox normally pulls a single funding input, but
+      //     if the default basket only has fragments smaller than the
+      //     fee, it combines multiple — which the template can't accept.
+      //     Same constraint applies to the SDK's `BuildDstasTransferTx`
+      //     (see `input-builder.ts:resolveFundingInput`).
+      //
+      //     Fail clean here so the user gets an actionable message
+      //     instead of a cryptic "OP_EQUALVERIFY required equal" deep
+      //     in the script evaluator.
+      const nonDstasInputs: number[] = []
       for (let i = 0; i < tx.inputs.length; i++) {
         if (i === 0) continue // input 0 is our DSTAS source
-        fundingInputIdx = i
-        break
+        nonDstasInputs.push(i)
       }
-      if (fundingInputIdx < 0) {
+      if (nonDstasInputs.length === 0) {
         return { ok: false, reason: 'no funding input found in the assembled tx' }
       }
+      if (nonDstasInputs.length > 1) {
+        return {
+          ok: false,
+          reason:
+            `DSTAS template requires exactly one funding input, but wallet-toolbox ` +
+            `picked ${nonDstasInputs.length} from the default basket — likely ` +
+            `because no single change UTXO is large enough to cover the tx fee. ` +
+            `Workaround: consolidate the default basket by sending a small BSV ` +
+            `self-payment to yourself first, then retry the DSTAS send. ` +
+            `(Same architectural constraint applies to the SDK's BuildDstasTransferTx.)`,
+        }
+      }
+      const fundingInputIdx = nonDstasInputs[0]
+
+      // Same constraint on outputs: the DSTAS template walks outputs and
+      // expects exactly the recipient DSTAS output + at most 1 P2PKH
+      // change output (+ optional null-data). Multiple P2PKH outputs from
+      // fragmentation would break the template's per-output handling.
+      let p2pkhOutputCount = 0
+      for (const out of tx.outputs) {
+        const sh = out.script.toHex()
+        if (sh.startsWith('76a914') && sh.endsWith('88ac') && sh.length === 50) {
+          p2pkhOutputCount++
+        }
+      }
+      if (p2pkhOutputCount > 1) {
+        return {
+          ok: false,
+          reason:
+            `DSTAS template requires at most one P2PKH change output, but the ` +
+            `assembled tx has ${p2pkhOutputCount}. Same root cause as the ` +
+            `multi-funding-input case — consolidate the default basket first.`,
+        }
+      }
+
+      console.log(
+        `[dstas-transfer] tx shape: ${tx.inputs.length} inputs (DSTAS at 0, funding at ${fundingInputIdx}), ${tx.outputs.length} outputs`
+      )
 
       // 11. Sighash + signature for input 0.
       let sigDer: Uint8Array
@@ -399,6 +456,28 @@ export class DstasTransferService {
         return {
           ok: false,
           reason: `broadcast failed: ${JSON.stringify(failed)} (txid was ${signResp?.txid})`,
+        }
+      }
+
+      // 15. Stas-relay push — DSTAS has no public indexer (Bitails's STAS
+      //     matcher rejects DSTAS scripts), so the relay is how a remote
+      //     recipient's wallet discovers this send during its next scan.
+      //     Fail-soft: RelayClient.push returns null on errors and never
+      //     throws; the transfer is reported ok regardless.
+      if (this.relay && signResp?.txid) {
+        try {
+          const res = await this.relay.push({
+            txid: signResp.txid,
+            recipientAddress,
+            protocol: 'dstas',
+          })
+          if (res) {
+            console.log(`[dstas-transfer] relay push ✓ ${signResp.txid.slice(0, 12)}… → ${recipientAddress}${res.duplicate ? ' (dup)' : ''}`)
+          } else {
+            console.warn('[dstas-transfer] relay push returned null (relay unreachable)')
+          }
+        } catch (err) {
+          console.warn(`[dstas-transfer] relay push threw: ${errMsg(err)}`)
         }
       }
 

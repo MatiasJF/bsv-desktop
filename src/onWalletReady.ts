@@ -1421,6 +1421,67 @@ export const onWalletReady = async (
           break;
         }
 
+        case '/bsv-21/recover-by-outpoint': {
+          // Recover a pre-fix orphaned BSV-21 output. Pre-PR-32 sends
+          // produced change outputs without basket+customInstructions+tags,
+          // so they sit in the `outputs` table as `basketId=NULL` and
+          // never show up in listOutputs({basket:'bsv-21-tokens'}). The
+          // recovery flow proves ownership via key derivation, then
+          // retroactively assigns the basket metadata so they become
+          // visible and spendable again.
+          //
+          // Idempotent — already-recovered outputs return alreadyHadBasket=true.
+          try {
+            if (!_currentBsv21Discovery || !_currentStasBundle) {
+              response = {
+                request_id: req.request_id,
+                status: 503,
+                body: JSON.stringify({ error: 'BSV-21 discovery service not ready' }),
+              };
+              break;
+            }
+            const { txid, vout } = (req.body ? JSON.parse(req.body) : {}) as {
+              txid?: string;
+              vout?: number;
+            };
+            if (typeof txid !== 'string' || !/^[0-9a-f]{64}$/i.test(txid)) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({ error: 'txid (64-hex) is required' }),
+              };
+              break;
+            }
+            if (typeof vout !== 'number' || !Number.isInteger(vout) || vout < 0) {
+              response = {
+                request_id: req.request_id,
+                status: 400,
+                body: JSON.stringify({ error: 'vout (non-negative integer) is required' }),
+              };
+              break;
+            }
+            const { identityKey, chain } = _currentStasBundle;
+            const result = await _currentBsv21Discovery.recoverByOutpoint({
+              txid,
+              vout,
+              identityKey,
+              chain,
+            });
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify(result),
+            };
+          } catch (e) {
+            response = {
+              request_id: req.request_id,
+              status: 500,
+              body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
+            };
+          }
+          break;
+        }
+
         default: {
           response = {
             request_id: req.request_id,
