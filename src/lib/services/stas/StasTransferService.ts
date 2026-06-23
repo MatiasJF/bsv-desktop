@@ -43,6 +43,20 @@ export interface StasTransferArgs {
     scriptHex: string;
     satoshis: number;
     brc42KeyId: string;
+    /**
+     * Optional owner-key derivation override for signing the STAS input.
+     * Defaults to the self-owned scheme (protocolID STAS_PROTOCOL_ID,
+     * keyID `brc42KeyId`, counterparty 'self'). A token received over a
+     * peer channel (BRC-29) is owned under a derivation keyed to the SENDER,
+     * so re-spending it requires `keyID = "<prefix> <suffix>"` and
+     * `counterparty = senderIdentityKey`. Supplying this makes such tokens
+     * spendable without changing the default self-custody path.
+     */
+    owner?: {
+      protocolID?: [number, string];
+      keyID: string;
+      counterparty: string;
+    };
   };
   recipientAddress: string;
 }
@@ -72,14 +86,23 @@ export class StasTransferService {
 
     const { updateStasScript, partialSTASUnlockingScript, getVersion } = stasInternals;
 
+    // Effective owner-key derivation. Defaults to the self-owned scheme; a
+    // BRC-29 peer-received token overrides keyID + counterparty so it stays
+    // spendable.
+    const ownerDerivation = {
+      protocolID: (source.owner?.protocolID ?? STAS_PROTOCOL_ID) as any,
+      keyID: source.owner?.keyID ?? source.brc42KeyId,
+      counterparty: (source.owner?.counterparty ?? STAS_COUNTERPARTY) as any,
+    };
+
     // 1. Owner pubkey via BRC-42 derivation.
     let ownerPubKey: any;
     try {
       const { publicKey } = await this.wallet.getPublicKey(
         {
-          protocolID: STAS_PROTOCOL_ID as any,
-          keyID: source.brc42KeyId,
-          counterparty: STAS_COUNTERPARTY as any,
+          protocolID: ownerDerivation.protocolID,
+          keyID: ownerDerivation.keyID,
+          counterparty: ownerDerivation.counterparty,
         },
         ORIGINATOR
       );
@@ -343,9 +366,9 @@ export class StasTransferService {
 
         const sigRes = await this.wallet.createSignature(
           {
-            protocolID: STAS_PROTOCOL_ID as any,
-            keyID: source.brc42KeyId,
-            counterparty: STAS_COUNTERPARTY as any,
+            protocolID: ownerDerivation.protocolID,
+            keyID: ownerDerivation.keyID,
+            counterparty: ownerDerivation.counterparty,
             hashToDirectlySign: digestBytes,
           } as any,
           ORIGINATOR
