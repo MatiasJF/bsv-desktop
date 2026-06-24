@@ -22,6 +22,7 @@ import Settings from './Settings'; // Assuming index.tsx or similar
 import Security from './Security'; // Assuming index.tsx or similar
 import { UserContext } from '../../UserContext';
 import Payments from './Payments';
+import PeerTokens from './PeerTokens';
 import LegacyBridge from './LegacyBridge';
 // Note: These might still be .jsx files and need refactoring later
 import AppAccess from './AppAccess'; // Assuming index.jsx or similar
@@ -139,6 +140,10 @@ export default function Dashboard() {
           <Route
             path='/dashboard/payments'
             component={Payments}
+          />
+          <Route
+            path='/dashboard/peer-tokens'
+            component={PeerTokens}
           />
           <Route
             path='/dashboard/legacybridge'

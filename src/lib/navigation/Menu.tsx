@@ -747,6 +747,26 @@ export default function Menu({ menuOpen, setMenuOpen, menuRef }: MenuProps) {
           </ListItemButton>
 
           <ListItemButton
+            onClick={() => navigation.push('/dashboard/peer-tokens')}
+            selected={history.location.pathname === '/dashboard/peer-tokens'}
+            sx={menuItemStyle(history.location.pathname === '/dashboard/peer-tokens')}
+          >
+            <ListItemIcon sx={{ minWidth: 40, color: history.location.pathname === '/dashboard/peer-tokens' ? 'primary.main' : 'inherit' }}>
+              <TokenIcon />
+            </ListItemIcon>
+            <ListItemText
+              primary={
+                <Typography
+                  variant="body1"
+                  fontWeight={history.location.pathname === '/dashboard/peer-tokens' ? 600 : 400}
+                >
+                  Peer Tokens
+                </Typography>
+              }
+            />
+          </ListItemButton>
+
+          <ListItemButton
             onClick={() => navigation.push('/dashboard/assets')}
             selected={history.location.pathname === '/dashboard/assets'}
             sx={menuItemStyle(history.location.pathname === '/dashboard/assets')}

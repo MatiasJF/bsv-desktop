@@ -58,8 +58,12 @@ import {
   BSV21DiscoveryService,
 } from './tokens'
 import { DstasTransferService } from './tokens/dstas/DstasTransferService'
+import { PeerTokenClient } from './tokens/peer/PeerTokenClient'
+import { StasTokenSettlementAdapter } from './tokens/peer/StasTokenSettlementAdapter'
+import { Bsv21TokenSettlementAdapter } from './tokens/peer/Bsv21TokenSettlementAdapter'
+import { DstasTokenSettlementAdapter } from './tokens/peer/DstasTokenSettlementAdapter'
 import { StorageElectronIPC } from '../StorageElectronIPC'
-import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB } from '../config'
+import { DEFAULT_CHAIN, ADMIN_ORIGINATOR, DEFAULT_USE_WAB, MESSAGEBOX_HOST } from '../config'
 import type { LoginType, WABConfig } from '../WalletContext'
 import type { WalletProfile } from '../types/WalletProfile'
 
@@ -90,6 +94,12 @@ export type StasServices = {
   bsv21Discovery: BSV21DiscoveryService
   /** 1Sat overlay REST client — exposed for diagnostics + the receive UI. */
   bsv21Indexer: OneSatIndexerClient
+  /**
+   * Peer-to-peer token client over MessageBox (the token analog of PeerPay).
+   * Sends/accepts STAS, DSTAS, and BSV-21 tokens directly to a recipient's
+   * identity key via the configured MessageBox host.
+   */
+  peerTokens: PeerTokenClient
 }
 
 export type WalletServiceSnapshot = {
@@ -626,6 +636,29 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         registration: bsv21Registration,
         wallet,
       })
+
+      // Peer-token client (token analog of PeerPay). Uses the same raw
+      // `wallet` the token services use, so signing/derivation namespaces
+      // match. Each adapter reuses the existing transfer-service building
+      // blocks; the BRC-29 owner derivation lives inside the adapters.
+      const peerTokens = new PeerTokenClient({
+        messageBoxHost: this._messageBoxUrl || MESSAGEBOX_HOST,
+        walletClient: wallet,
+        originator: this._adminOriginator,
+        adapters: [
+          new StasTokenSettlementAdapter(wallet, keyDeriver.identityKey, chain),
+          new Bsv21TokenSettlementAdapter({
+            wallet,
+            identityKey: keyDeriver.identityKey,
+            chain,
+            deriver: bsv21KeyDeriver,
+            indexer: bsv21Indexer,
+            relay,
+          }),
+          new DstasTokenSettlementAdapter(wallet, keyDeriver.identityKey, chain, relay),
+        ],
+      })
+
       this._stas = {
         keyDeriver: stasKeyDeriver,
         ownership: new StasOwnershipService(stasKeyDeriver),
@@ -635,6 +668,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         bsv21KeyDeriver,
         bsv21Discovery,
         bsv21Indexer,
+        peerTokens,
       }
 
       // Load settings
