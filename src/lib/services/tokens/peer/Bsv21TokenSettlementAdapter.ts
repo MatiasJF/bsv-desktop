@@ -1,51 +1,47 @@
 /**
- * StasTokenSettlementAdapter — concrete TokenSettlementAdapter for classic STAS.
+ * Bsv21TokenSettlementAdapter — concrete TokenSettlementAdapter for BSV-21.
  *
- * Plugs into `PeerTokenClient` (from @bsv/message-box-client) to move classic
- * STAS tokens peer-to-peer over MessageBox, the token analog of PeerPay's
- * BRC-29 settlement. It composes the wallet's existing building blocks:
- *   - owner-field derivation (BRC-29 style, so the recipient can reconstruct
- *     the key) via wallet.getPublicKey;
- *   - StasTransferService.transfer to build + sign + broadcast the transfer;
- *   - buildChainedAtomicBeef to package the signed tx for the recipient;
- *   - wallet.internalizeAction (basket insertion) on accept, recording the
- *     BRC-29 derivation so the received token stays re-spendable.
+ * The BSV-21 analog of StasTokenSettlementAdapter. Because BSV-21 ownership is
+ * plain P2PKH (no engine), the peer flow is closer to PeerPay's BRC-29:
+ *   - buildTokenSettlement derives the recipient's owner key BRC-29-style
+ *     (counterparty = recipient) and reuses BSV21TransferService.transfer,
+ *     which supports divisible/partial sends (recipient + token-change);
+ *   - acceptTokenSettlement internalizes the recipient output into the BSV-21
+ *     basket, recording the BRC-29 derivation so the token stays re-spendable.
  *
- * The TokenSettlementAdapter interface is mirrored locally until
- * @bsv/message-box-client publishes it; the shape is structurally identical, so
- * this class is assignable to the published interface after the version bump.
+ * The TokenSettlementAdapter interface is mirrored locally (see
+ * ./tokenSettlementTypes) until @bsv/message-box-client publishes it.
  */
 import type { WalletInterface } from '@bsv/sdk';
 import { Hash, Utils, createNonce } from '@bsv/sdk';
-import { StasTransferService } from '../../stas/StasTransferService';
+import { BSV21TransferService, type BSV21TransferDeps } from '../bsv21/BSV21TransferService';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
-import { STAS_PROTOCOL_ID } from '../../stas/constants';
-import { STAS_BASKET } from '../../../constants/baskets';
+import { BSV21_PROTOCOL_ID } from '../bsv21/constants';
+import { BSV21_BASKET } from '../../../constants/baskets';
 import type {
   TokenSettlementAdapter, TokenSourceRef, TokenSettlementArtifact,
   TokenAdapterContext, TokenBuildResult, TokenAcceptResult,
 } from './tokenSettlementTypes';
 
-const ORIGINATOR = 'admin.stas-peer';
+const ORIGINATOR = 'admin.bsv21-peer';
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
-  readonly protocol = 'stas';
+export type Bsv21AdapterDeps = BSV21TransferDeps;
 
-  constructor(
-    private readonly wallet: WalletInterface,
-    private readonly identityKey: string,
-    private readonly chain: 'main' | 'test'
-  ) {}
+export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
+  readonly protocol = 'bsv-21';
+  private readonly wallet: WalletInterface;
+  private readonly chain: 'main' | 'test';
 
-  /**
-   * Derives the recipient's STAS owner key with a BRC-29-style shared
-   * derivation: the recipient can reconstruct the matching private key by
-   * deriving with `counterparty = senderIdentityKey` and the same keyID.
-   */
+  constructor(private readonly deps: Bsv21AdapterDeps) {
+    this.wallet = deps.wallet;
+    this.chain = deps.chain;
+  }
+
+  /** BRC-29-style derivation so the recipient can reconstruct the owner key. */
   private async deriveRecipientAddress(
     recipient: string,
     derivationPrefix: string,
@@ -53,7 +49,7 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<string> {
     const { publicKey } = await this.wallet.getPublicKey(
       {
-        protocolID: STAS_PROTOCOL_ID as any,
+        protocolID: BSV21_PROTOCOL_ID as any,
         keyID: `${derivationPrefix} ${derivationSuffix}`,
         counterparty: recipient as any,
       },
@@ -69,24 +65,12 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
     ctx: TokenAdapterContext
   ): Promise<TokenBuildResult> {
     const { recipient, source, amount } = args;
-
-    // v1 supports full-value transfer only (classic STAS amount == satoshis).
-    if (amount !== String(source.satoshis)) {
-      return {
-        action: 'terminate',
-        termination: {
-          code: 'stas.partial_unsupported',
-          message: `classic STAS peer transfer is full-value only (amount=${amount}, utxo=${source.satoshis})`,
-        },
-      };
-    }
-
     try {
       const derivationPrefix = await createNonce(this.wallet, 'self', ctx.originator);
       const derivationSuffix = await createNonce(this.wallet, 'self', ctx.originator);
       const recipientAddress = await this.deriveRecipientAddress(recipient, derivationPrefix, derivationSuffix);
 
-      const transfer = new StasTransferService(this.wallet, this.identityKey, this.chain);
+      const transfer = new BSV21TransferService(this.deps);
       const res = await transfer.transfer({
         source: {
           txid: source.txid,
@@ -94,16 +78,20 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
           scriptHex: source.lockingScriptHex,
           satoshis: source.satoshis,
           brc42KeyId: source.brc42KeyId ?? 'recv 0',
+          tokenId: source.assetId,
+          amt: String(source.amt ?? amount),
+          dec: source.dec as number | undefined,
+          sym: source.sym as string | undefined,
+          icon: source.icon as string | undefined,
           owner: source.owner,
         },
+        amount,
         recipientAddress,
       });
       if (!res.ok || res.txid == null) {
-        return { action: 'terminate', termination: { code: 'stas.transfer_failed', message: res.reason ?? 'transfer failed' } };
+        return { action: 'terminate', termination: { code: 'bsv21.transfer_failed', message: res.reason ?? 'transfer failed' } };
       }
 
-      // Package the broadcast tx as a chained AtomicBEEF so the recipient can
-      // internalize it (basket insertion) into their own wallet.
       const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid });
 
       return {
@@ -111,14 +99,14 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
         artifact: {
           customInstructions: { derivationPrefix, derivationSuffix },
           transaction: built.atomicBeef,
-          protocol: 'stas',
+          protocol: 'bsv-21',
           assetId: source.assetId,
           amount,
-          outputIndex: 0, // STAS engine places the recipient output at vout 0
+          outputIndex: 0, // recipient BSV-21 output is built first
         },
       };
     } catch (err) {
-      return { action: 'terminate', termination: { code: 'stas.build_error', message: errMsg(err) } };
+      return { action: 'terminate', termination: { code: 'bsv21.build_error', message: errMsg(err) } };
     }
   }
 
@@ -128,10 +116,10 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenAcceptResult> {
     const { sender, settlement } = args;
     try {
-      // Record the BRC-29 derivation so a later transfer can re-derive the
-      // owner key: keyID = "<prefix> <suffix>", counterparty = senderIdentityKey.
       const customInstructions = JSON.stringify({
         scheme: 'brc29',
+        kind: 'bsv-21',
+        tokenId: settlement.assetId,
         derivationPrefix: settlement.customInstructions.derivationPrefix,
         derivationSuffix: settlement.customInstructions.derivationSuffix,
         senderIdentityKey: sender,
@@ -145,13 +133,13 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
               outputIndex: settlement.outputIndex,
               protocol: 'basket insertion',
               insertionRemittance: {
-                basket: STAS_BASKET,
+                basket: BSV21_BASKET,
                 customInstructions,
-                tags: ['stas', 'peer'],
+                tags: ['bsv21', 'peer', `id:${settlement.assetId}`],
               },
             },
           ],
-          description: 'STAS peer receive',
+          description: 'BSV-21 peer receive',
           seekPermission: false,
         } as any,
         ORIGINATOR
@@ -159,7 +147,7 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
 
       return { action: 'accept', receiptData: { internalizeResult } };
     } catch (err) {
-      return { action: 'terminate', termination: { code: 'stas.internalize_failed', message: errMsg(err) } };
+      return { action: 'terminate', termination: { code: 'bsv21.internalize_failed', message: errMsg(err) } };
     }
   }
 }

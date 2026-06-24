@@ -52,6 +52,19 @@ export interface BSV21TransferArgs {
     dec?: number;
     sym?: string;
     icon?: string;
+    /**
+     * Optional owner-key derivation override for signing the BSV-21 input.
+     * Defaults to the self-owned scheme (BSV21_PROTOCOL_ID, keyID
+     * `brc42KeyId`, counterparty 'self'). A token received over a peer
+     * channel (BRC-29) is owned under a derivation keyed to the SENDER, so
+     * re-spending it requires `keyID = "<prefix> <suffix>"` and
+     * `counterparty = senderIdentityKey`. Backward compatible.
+     */
+    owner?: {
+      protocolID?: [number, string];
+      keyID: string;
+      counterparty: string;
+    };
   };
   /** Amount of tokens (raw integer units) to send. */
   amount: string;
@@ -337,6 +350,14 @@ export class BSV21TransferService {
     //    in the sighash subject (BSV sighash hashes whole locking script).
     let sigHex: string;
     let ownerPubKeyHex: string;
+    // Effective owner-key derivation. Defaults to the self-owned scheme; a
+    // BRC-29 peer-received token overrides keyID + counterparty so it stays
+    // spendable.
+    const ownerDerivation = {
+      protocolID: (source.owner?.protocolID ?? BSV21_PROTOCOL_ID) as any,
+      keyID: source.owner?.keyID ?? source.brc42KeyId,
+      counterparty: (source.owner?.counterparty ?? BSV21_COUNTERPARTY) as any,
+    };
     try {
       const sourceLocking = bsv.Script.fromHex(source.scriptHex);
       const satsBN = new bsv.crypto.BN(source.satoshis);
@@ -348,9 +369,9 @@ export class BSV21TransferService {
 
       const sigRes = await wallet.createSignature(
         {
-          protocolID: BSV21_PROTOCOL_ID as any,
-          keyID: source.brc42KeyId,
-          counterparty: BSV21_COUNTERPARTY as any,
+          protocolID: ownerDerivation.protocolID,
+          keyID: ownerDerivation.keyID,
+          counterparty: ownerDerivation.counterparty,
           hashToDirectlySign: digestBytes,
         } as any,
         ORIGINATOR
@@ -360,9 +381,9 @@ export class BSV21TransferService {
       // Derive the matching pubkey for the unlocking script.
       const { publicKey } = await wallet.getPublicKey(
         {
-          protocolID: BSV21_PROTOCOL_ID as any,
-          keyID: source.brc42KeyId,
-          counterparty: BSV21_COUNTERPARTY as any,
+          protocolID: ownerDerivation.protocolID,
+          keyID: ownerDerivation.keyID,
+          counterparty: ownerDerivation.counterparty,
         } as any,
         ORIGINATOR
       );
