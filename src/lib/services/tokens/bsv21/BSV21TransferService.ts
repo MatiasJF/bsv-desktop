@@ -75,6 +75,8 @@ export interface BSV21TransferResult {
   ok: boolean;
   txid?: string;
   reason?: string;
+  /** Signed AtomicBEEF of the transfer (from signAction) — for peer delivery. */
+  beef?: number[];
 }
 
 export interface BSV21TransferDeps {
@@ -487,7 +489,7 @@ export class BSV21TransferService {
       }
     }
 
-    return { ok: true, txid: signResp?.txid };
+    return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
   }
 }
 

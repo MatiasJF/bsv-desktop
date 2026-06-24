@@ -70,6 +70,22 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
       const derivationSuffix = await createNonce(this.wallet, 'self', ctx.originator);
       const recipientAddress = await this.deriveRecipientAddress(recipient, derivationPrefix, derivationSuffix);
 
+      // Dry run: prove derivation + validation only — never touch the chain.
+      if (ctx.dryRun) {
+        ctx.logger?.log(`[bsv-21 dry-run] would transfer ${amount} to ${recipientAddress}`);
+        return {
+          action: 'settle',
+          artifact: {
+            customInstructions: { derivationPrefix, derivationSuffix },
+            transaction: [],
+            protocol: 'bsv-21',
+            assetId: source.assetId,
+            amount,
+            outputIndex: 0,
+          },
+        };
+      }
+
       const transfer = new BSV21TransferService(this.deps);
       const res = await transfer.transfer({
         source: {
@@ -92,13 +108,15 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
         return { action: 'terminate', termination: { code: 'bsv21.transfer_failed', message: res.reason ?? 'transfer failed' } };
       }
 
-      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid });
+      const transaction = (res.beef && res.beef.length > 0)
+        ? res.beef
+        : (await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid })).atomicBeef;
 
       return {
         action: 'settle',
         artifact: {
           customInstructions: { derivationPrefix, derivationSuffix },
-          transaction: built.atomicBeef,
+          transaction,
           protocol: 'bsv-21',
           assetId: source.assetId,
           amount,

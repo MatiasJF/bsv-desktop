@@ -86,6 +86,22 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
       const derivationSuffix = await createNonce(this.wallet, 'self', ctx.originator);
       const recipientAddress = await this.deriveRecipientAddress(recipient, derivationPrefix, derivationSuffix);
 
+      // Dry run: prove derivation + validation only — never touch the chain.
+      if (ctx.dryRun) {
+        ctx.logger?.log(`[stas dry-run] would transfer ${amount} to ${recipientAddress}`);
+        return {
+          action: 'settle',
+          artifact: {
+            customInstructions: { derivationPrefix, derivationSuffix },
+            transaction: [],
+            protocol: 'stas',
+            assetId: source.assetId,
+            amount,
+            outputIndex: 0,
+          },
+        };
+      }
+
       const transfer = new StasTransferService(this.wallet, this.identityKey, this.chain);
       const res = await transfer.transfer({
         source: {
@@ -102,15 +118,17 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
         return { action: 'terminate', termination: { code: 'stas.transfer_failed', message: res.reason ?? 'transfer failed' } };
       }
 
-      // Package the broadcast tx as a chained AtomicBEEF so the recipient can
-      // internalize it (basket insertion) into their own wallet.
-      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid });
+      // Prefer the signed AtomicBEEF the wallet already returned (no re-fetch
+      // race); fall back to assembling a chained BEEF if it wasn't surfaced.
+      const transaction = (res.beef && res.beef.length > 0)
+        ? res.beef
+        : (await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid })).atomicBeef;
 
       return {
         action: 'settle',
         artifact: {
           customInstructions: { derivationPrefix, derivationSuffix },
-          transaction: built.atomicBeef,
+          transaction,
           protocol: 'stas',
           assetId: source.assetId,
           amount,

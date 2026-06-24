@@ -115,15 +115,19 @@ export class PeerTokenClient extends MessageBoxClient {
     return adapter;
   }
 
-  private get adapterContext(): TokenAdapterContext {
-    return { wallet: this.peerTokenWalletClient, originator: this.originator, logger: log };
+  private adapterContext(dryRun = false): TokenAdapterContext {
+    return { wallet: this.peerTokenWalletClient, originator: this.originator, logger: log, dryRun };
   }
 
-  async createTokenToken(params: SendTokenParams): Promise<TokenToken> {
+  /**
+   * Builds a transferable token artifact. With `dryRun` the adapter derives the
+   * recipient + validates only and DOES NOT touch the chain (empty transaction).
+   */
+  async createTokenToken(params: SendTokenParams, dryRun = false): Promise<TokenToken> {
     const adapter = this.adapterFor(params.protocol);
     const result = await adapter.buildTokenSettlement(
       { recipient: params.recipient, source: params.source, amount: params.amount },
-      this.adapterContext
+      this.adapterContext(dryRun)
     );
     if (result.action === 'terminate') throw new Error(result.termination.message);
     const { artifact } = result;
@@ -191,7 +195,7 @@ export class PeerTokenClient extends MessageBoxClient {
             outputIndex: incoming.token.outputIndex ?? 0,
           },
         },
-        this.adapterContext
+        this.adapterContext()
       );
       if (result.action === 'terminate') throw new Error(result.termination.message);
       await this.acknowledgeMessage({ messageIds: [incoming.messageId] });

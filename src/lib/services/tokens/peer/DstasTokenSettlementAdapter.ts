@@ -84,6 +84,22 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
       const derivationSuffix = await createNonce(this.wallet, 'self', ctx.originator);
       const recipientAddress = await this.deriveRecipientAddress(recipient, derivationPrefix, derivationSuffix);
 
+      // Dry run: prove derivation + validation only — never touch the chain.
+      if (ctx.dryRun) {
+        ctx.logger?.log(`[dstas dry-run] would transfer ${amount} to ${recipientAddress}`);
+        return {
+          action: 'settle',
+          artifact: {
+            customInstructions: { derivationPrefix, derivationSuffix },
+            transaction: [],
+            protocol: 'dstas',
+            assetId: source.assetId,
+            amount,
+            outputIndex: 0,
+          },
+        };
+      }
+
       const transfer = new DstasTransferService(this.wallet, this.identityKey, this.chain, this.relay);
       const res = await transfer.transfer({
         source: {
@@ -100,13 +116,15 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
         return { action: 'terminate', termination: { code: 'dstas.transfer_failed', message: res.reason ?? 'transfer failed' } };
       }
 
-      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid });
+      const transaction = (res.beef && res.beef.length > 0)
+        ? res.beef
+        : (await buildChainedAtomicBeef({ wallet: this.wallet, txid: res.txid })).atomicBeef;
 
       return {
         action: 'settle',
         artifact: {
           customInstructions: { derivationPrefix, derivationSuffix },
-          transaction: built.atomicBeef,
+          transaction,
           protocol: 'dstas',
           assetId: source.assetId,
           amount,

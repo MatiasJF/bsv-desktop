@@ -201,9 +201,10 @@ export default function PeerTokens() {
         amount: amount || selected.amount,
       }
       if (dryRun) {
-        const token = await peerTokens.createTokenToken(params)
-        toast.success(`DRY RUN ok — built ${selected.protocol} settlement (not sent)`)
-        console.log('[PeerTokens] DRY RUN artifact', token)
+        // dryRun=true → adapter derives + validates only, never touches the chain.
+        const token = await peerTokens.createTokenToken(params, true)
+        toast.success(`DRY RUN ok — derived recipient + validated ${selected.protocol} (nothing sent, no broadcast)`)
+        console.log('[PeerTokens] DRY RUN preview', token)
       } else {
         await peerTokens.sendToken(params)
         toast.success(`Sent ${selected.protocol} token to ${recipient.slice(0, 12)}…`)

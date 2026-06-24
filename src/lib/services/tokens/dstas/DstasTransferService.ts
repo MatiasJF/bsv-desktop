@@ -82,6 +82,8 @@ export interface DstasTransferResult {
   ok: boolean
   txid?: string
   reason?: string
+  /** Signed AtomicBEEF of the transfer (from signAction) — for peer delivery. */
+  beef?: number[]
 }
 
 export class DstasTransferService {
@@ -503,7 +505,7 @@ export class DstasTransferService {
         }
       }
 
-      return { ok: true, txid: signResp?.txid }
+      return { ok: true, txid: signResp?.txid, beef: signResp?.tx }
     } finally {
       await restoreBasket()
     }

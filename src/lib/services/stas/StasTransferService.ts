@@ -65,6 +65,8 @@ export interface StasTransferResult {
   ok: boolean;
   txid?: string;
   reason?: string;
+  /** Signed AtomicBEEF of the transfer (from signAction) — for peer delivery. */
+  beef?: number[];
 }
 
 export class StasTransferService {
@@ -422,7 +424,7 @@ export class StasTransferService {
         };
       }
 
-      return { ok: true, txid: signResp?.txid };
+      return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
     } finally {
       await restoreBasket();
     }

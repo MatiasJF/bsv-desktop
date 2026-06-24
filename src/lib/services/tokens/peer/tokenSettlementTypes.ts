@@ -36,6 +36,12 @@ export interface TokenAdapterContext {
   wallet: WalletInterface;
   originator?: string;
   logger?: { log: (...a: any[]) => void; warn: (...a: any[]) => void; error: (...a: any[]) => void };
+  /**
+   * When true, the adapter MUST NOT touch the chain: derive the recipient
+   * address + validate inputs only, then return a preview artifact with an
+   * empty `transaction`. No createAction / signAction / broadcast.
+   */
+  dryRun?: boolean;
 }
 
 export interface Termination { code: string; message: string }
