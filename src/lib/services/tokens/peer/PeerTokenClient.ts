@@ -92,6 +92,7 @@ export interface PeerTokenClientConfig {
 export class PeerTokenClient extends MessageBoxClient {
   private readonly peerTokenWalletClient: WalletInterface;
   private readonly tokenMessageBox: string;
+  private readonly tokenHost?: string;
   private readonly adapters: Map<string, TokenSettlementAdapter>;
 
   constructor(config: PeerTokenClientConfig) {
@@ -102,6 +103,7 @@ export class PeerTokenClient extends MessageBoxClient {
       originator: config.originator,
     });
     this.tokenMessageBox = config.messageBox ?? STANDARD_TOKEN_MESSAGEBOX;
+    this.tokenHost = config.messageBoxHost;
     this.peerTokenWalletClient = config.walletClient;
     this.originator = config.originator;
     this.adapters = new Map(config.adapters.map((a) => [a.protocol, a]));
@@ -148,23 +150,24 @@ export class PeerTokenClient extends MessageBoxClient {
     const token = await this.createTokenToken(params);
     await this.sendMessage(
       { recipient: params.recipient, messageBox: this.tokenMessageBox, body: JSON.stringify(token) },
-      hostOverride
+      hostOverride ?? this.tokenHost
     );
   }
 
   async sendLiveToken(params: SendTokenParams, overrideHost?: string): Promise<void> {
     const token = await this.createTokenToken(params);
+    const host = overrideHost ?? this.tokenHost;
     try {
       await this.sendLiveMessage({
         recipient: params.recipient,
         messageBox: this.tokenMessageBox,
         body: JSON.stringify(token),
-      });
+      }, host);
     } catch (err) {
       log.warn('sendLiveMessage failed, falling back to HTTP:', err);
       await this.sendMessage(
         { recipient: params.recipient, messageBox: this.tokenMessageBox, body: JSON.stringify(token) },
-        overrideHost
+        host
       );
     }
   }
@@ -172,12 +175,13 @@ export class PeerTokenClient extends MessageBoxClient {
   async listenForLiveTokens(params: { onToken: (t: IncomingToken) => void; overrideHost?: string }): Promise<void> {
     await this.listenForLiveMessages({
       messageBox: this.tokenMessageBox,
+      host: params.overrideHost ?? this.tokenHost,
       onMessage: (message: PeerMessage) => {
         const token = safeParse<TokenToken>(message.body);
         if (token == null) return;
         params.onToken({ messageId: message.messageId, sender: message.sender, token });
       },
-    });
+    } as any);
   }
 
   async acceptToken(incoming: IncomingToken): Promise<any> {
@@ -198,7 +202,7 @@ export class PeerTokenClient extends MessageBoxClient {
         this.adapterContext()
       );
       if (result.action === 'terminate') throw new Error(result.termination.message);
-      await this.acknowledgeMessage({ messageIds: [incoming.messageId] });
+      await this.acknowledgeMessage({ messageIds: [incoming.messageId], host: this.tokenHost });
       return { incoming, receiptData: result.receiptData };
     } catch (error) {
       log.error(`Error accepting token: ${String(error)}`);
@@ -207,7 +211,10 @@ export class PeerTokenClient extends MessageBoxClient {
   }
 
   async listIncomingTokens(overrideHost?: string): Promise<IncomingToken[]> {
-    const messages = await this.listMessages({ messageBox: this.tokenMessageBox, host: overrideHost });
+    // listMessagesLite talks to the host directly and skips overlay (SLAP)
+    // host resolution — required on mainnet where ls_messagebox has no
+    // advertised hosts. listMessages would throw "_queryAdvertisements failed".
+    const messages = await this.listMessagesLite({ messageBox: this.tokenMessageBox, host: overrideHost ?? this.tokenHost });
     return messages
       .map((msg: any) => {
         const token = safeParse<TokenToken>(msg.body);
