@@ -147,11 +147,14 @@ export class PeerTokenClient extends MessageBoxClient {
     if (!params.recipient || params.recipient.trim() === '') {
       throw new Error('Invalid token transfer: recipient is required');
     }
+    log.log('sendToken: building settlement (this signs + broadcasts the transfer)…');
     const token = await this.createTokenToken(params);
+    log.log(`sendToken: settlement built (beef ${token.transaction.length} bytes); delivering via MessageBox to host ${hostOverride ?? this.tokenHost}…`);
     await this.sendMessage(
       { recipient: params.recipient, messageBox: this.tokenMessageBox, body: JSON.stringify(token) },
       hostOverride ?? this.tokenHost
     );
+    log.log('sendToken: MessageBox delivery complete.');
   }
 
   async sendLiveToken(params: SendTokenParams, overrideHost?: string): Promise<void> {

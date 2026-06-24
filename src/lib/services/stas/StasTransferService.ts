@@ -113,6 +113,19 @@ export class StasTransferService {
       return { ok: false, reason: `getPublicKey: ${errMsg(err)}` };
     }
 
+    // Diagnostic: does our signing key actually own this UTXO? Compare the
+    // hash160 of the derived owner pubkey to the owner pkh baked in the source
+    // script (76a914 <owner:20> …). A mismatch = wrong brc42KeyId/counterparty.
+    try {
+      const derivedOwnerPkh = bsv.crypto.Hash.sha256ripemd160(ownerPubKey.toBuffer()).toString('hex');
+      const sourceOwnerPkh = source.scriptHex.substring(6, 46);
+      // eslint-disable-next-line no-console
+      console.log('[stas-transfer] OWNER CHECK — keyID:', ownerDerivation.keyID,
+        'counterparty:', ownerDerivation.counterparty,
+        '| derived pkh:', derivedOwnerPkh, '| source owner pkh:', sourceOwnerPkh,
+        '| MATCH:', derivedOwnerPkh === sourceOwnerPkh);
+    } catch { /* never block on diagnostics */ }
+
     // 2. Recipient hash160.
     let recipientPkhHex: string;
     try {

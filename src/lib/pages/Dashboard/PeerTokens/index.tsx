@@ -53,6 +53,7 @@ export default function PeerTokens() {
   const peerTokens = stas?.peerTokens
   const identityKey: string | undefined = stas?.keyDeriver?.identityKey
   const chain: 'main' | 'test' = stas?.keyDeriver?.chain ?? 'main'
+  const originator: string | undefined = ctx?.adminOriginator
 
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [loadingHoldings, setLoadingHoldings] = useState(false)
@@ -110,7 +111,7 @@ export default function PeerTokens() {
         includeCustomInstructions: true,
         include: 'locking scripts',
         limit: 200,
-      })
+      }, originator)
       for (const o of res?.outputs ?? []) {
         const [txid, voutStr] = String(o.outpoint ?? '.').split('.')
         const scriptHex = o.lockingScript ?? null
@@ -147,7 +148,7 @@ export default function PeerTokens() {
     }
     setHoldings(next)
     setLoadingHoldings(false)
-  }, [wallet, identityKey, chain])
+  }, [wallet, identityKey, chain, originator])
 
   // ── Incoming ──────────────────────────────────────────────────────────────
   const refreshIncoming = useCallback(async () => {
@@ -206,12 +207,18 @@ export default function PeerTokens() {
         toast.success(`DRY RUN ok — derived recipient + validated ${selected.protocol} (nothing sent, no broadcast)`)
         console.log('[PeerTokens] DRY RUN preview', token)
       } else {
+        console.log('[PeerTokens] LIVE send', params.protocol, params.amount, '→', params.recipient.slice(0, 16), '…')
         await peerTokens.sendToken(params)
         toast.success(`Sent ${selected.protocol} token to ${recipient.slice(0, 12)}…`)
         await loadHoldings()
       }
     } catch (e: any) {
-      toast.error(`Send failed: ${e?.message ?? String(e)}`)
+      // Surface the full error to the console so it can be read/copied — the
+      // toast truncates and there was previously no log.
+      console.error('[PeerTokens] send failed — full error:', e)
+      console.error('[PeerTokens] send failed — message:', e?.message)
+      console.error('[PeerTokens] send failed — stack:', e?.stack)
+      toast.error(`Send failed: ${String(e?.message ?? e).slice(0, 160)}`)
     } finally {
       setSending(false)
     }
