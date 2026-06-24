@@ -61,6 +61,19 @@ export interface DstasTransferArgs {
     scriptHex: string
     satoshis: number
     brc42KeyId: string
+    /**
+     * Optional owner-key derivation override for signing the DSTAS input.
+     * Defaults to the self-owned scheme (STAS_PROTOCOL_ID, keyID
+     * `brc42KeyId`, counterparty 'self'). A token received over a peer
+     * channel (BRC-29) is owned under a derivation keyed to the SENDER, so
+     * re-spending it requires `keyID = "<prefix> <suffix>"` and
+     * `counterparty = senderIdentityKey`. Backward compatible.
+     */
+    owner?: {
+      protocolID?: [number, string]
+      keyID: string
+      counterparty: string
+    }
   }
   recipientAddress: string
 }
@@ -120,13 +133,22 @@ export class DstasTransferService {
     // 2. Owner pubkey via BRC-42 derivation. DSTAS shares STAS's
     //    receive namespace (see StasKeyDeriver) so the protocolID is
     //    the same.
+    // Effective owner-key derivation. Defaults to the self-owned scheme; a
+    // BRC-29 peer-received token overrides keyID + counterparty so it stays
+    // spendable.
+    const ownerDerivation = {
+      protocolID: (source.owner?.protocolID ?? STAS_PROTOCOL_ID) as any,
+      keyID: source.owner?.keyID ?? source.brc42KeyId,
+      counterparty: (source.owner?.counterparty ?? STAS_COUNTERPARTY) as any,
+    }
+
     let ownerPubKeyHex: string
     try {
       const { publicKey } = await this.wallet.getPublicKey(
         {
-          protocolID: STAS_PROTOCOL_ID as any,
-          keyID: source.brc42KeyId,
-          counterparty: STAS_COUNTERPARTY as any,
+          protocolID: ownerDerivation.protocolID,
+          keyID: ownerDerivation.keyID,
+          counterparty: ownerDerivation.counterparty,
         },
         ORIGINATOR
       )
@@ -360,9 +382,9 @@ export class DstasTransferService {
 
         const sigRes = await this.wallet.createSignature(
           {
-            protocolID: STAS_PROTOCOL_ID as any,
-            keyID: source.brc42KeyId,
-            counterparty: STAS_COUNTERPARTY as any,
+            protocolID: ownerDerivation.protocolID,
+            keyID: ownerDerivation.keyID,
+            counterparty: ownerDerivation.counterparty,
             hashToDirectlySign: digestBytes,
           } as any,
           ORIGINATOR
