@@ -16,9 +16,12 @@
  * @bsv/message-box-client publishes it.
  */
 import type { WalletInterface } from '@bsv/sdk';
-import { Hash, Utils, createNonce } from '@bsv/sdk';
+import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { DstasTransferService } from '../dstas/DstasTransferService';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
+import { StasRegistration } from '../../stas/StasRegistration';
+import { parseDstasLockingScript } from '../../stas/dstasParser';
+import { encodeBrc29KeyId } from './brc29KeyId';
 import { STAS_PROTOCOL_ID } from '../../stas/constants';
 import { DSTAS_BASKET } from '../../../constants/baskets';
 import type { RelayClient } from '../../relay/RelayClient';
@@ -142,36 +145,42 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenAcceptResult> {
     const { sender, settlement } = args;
     try {
-      const customInstructions = JSON.stringify({
-        scheme: 'brc29',
-        kind: 'dstas',
-        tokenId: settlement.assetId,
+      // Recover the received output from the delivered AtomicBEEF and register
+      // it into the satellite tables (like discovery) so it shows in Assets;
+      // DSTAS holdings are read from the satellite tables, not the raw basket.
+      const beef = Beef.fromBinary(settlement.transaction);
+      const txid = (beef as any).atomicTxid as string | undefined
+        ?? (beef as any).txs?.[(beef as any).txs.length - 1]?.txid;
+      if (txid == null) throw new Error('delivered BEEF has no atomic txid');
+      const btx = beef.findTxid(txid);
+      if (btx?.tx == null) throw new Error(`delivered BEEF missing tx ${txid}`);
+      const out = btx.tx.outputs[settlement.outputIndex];
+      if (out == null) throw new Error(`tx ${txid} has no output ${settlement.outputIndex}`);
+      const parsed = parseDstasLockingScript(out.lockingScript.toHex());
+      if (parsed == null) throw new Error('received output is not DSTAS');
+
+      const brc42KeyId = encodeBrc29KeyId({
         derivationPrefix: settlement.customInstructions.derivationPrefix,
         derivationSuffix: settlement.customInstructions.derivationSuffix,
         senderIdentityKey: sender,
       });
 
-      const internalizeResult = await this.wallet.internalizeAction(
-        {
-          tx: settlement.transaction,
-          outputs: [
-            {
-              outputIndex: settlement.outputIndex,
-              protocol: 'basket insertion',
-              insertionRemittance: {
-                basket: DSTAS_BASKET,
-                customInstructions,
-                tags: ['dstas', 'peer', `id:${settlement.assetId}`],
-              },
-            },
-          ],
-          description: 'DSTAS peer receive',
-          seekPermission: false,
-        } as any,
-        ORIGINATOR
-      );
+      const reg = new StasRegistration(this.wallet, this.identityKey, this.chain);
+      const result = await reg.register({
+        txid,
+        vout: settlement.outputIndex,
+        tokenSatoshis: out.satoshis ?? Number(settlement.amount),
+        ownerFieldHash160: parsed.ownerFieldHash160,
+        brc42KeyId,
+        parsed: { ...parsed, tokenId: parsed.tokenId || settlement.assetId } as any,
+        protocol: { id: 'dstas', basketName: DSTAS_BASKET },
+        atomicBeef: settlement.transaction,
+      });
+      if (!result.registered && result.reason !== 'already registered') {
+        return { action: 'terminate', termination: { code: 'dstas.register_failed', message: result.reason ?? 'register failed' } };
+      }
 
-      return { action: 'accept', receiptData: { internalizeResult } };
+      return { action: 'accept', receiptData: { internalizeResult: result } };
     } catch (err) {
       return { action: 'terminate', termination: { code: 'dstas.internalize_failed', message: errMsg(err) } };
     }

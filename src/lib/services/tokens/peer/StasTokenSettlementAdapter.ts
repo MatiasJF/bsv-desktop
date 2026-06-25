@@ -16,9 +16,12 @@
  * this class is assignable to the published interface after the version bump.
  */
 import type { WalletInterface } from '@bsv/sdk';
-import { Hash, Utils, createNonce } from '@bsv/sdk';
+import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { StasTransferService } from '../../stas/StasTransferService';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
+import { StasRegistration } from '../../stas/StasRegistration';
+import { parseClassicStasMetadata } from '../../stas/parseClassicStasMetadata';
+import { encodeBrc29KeyId } from './brc29KeyId';
 import { STAS_PROTOCOL_ID } from '../../stas/constants';
 import { STAS_BASKET } from '../../../constants/baskets';
 import type {
@@ -146,36 +149,60 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenAcceptResult> {
     const { sender, settlement } = args;
     try {
-      // Record the BRC-29 derivation so a later transfer can re-derive the
-      // owner key: keyID = "<prefix> <suffix>", counterparty = senderIdentityKey.
-      const customInstructions = JSON.stringify({
-        scheme: 'brc29',
+      // 1. Recover the received output (txid, vout, script) from the delivered
+      //    AtomicBEEF so we can register it exactly like discovery does — which
+      //    is what makes it show up in the Assets view (STAS holdings are read
+      //    from the satellite tables, not the raw basket).
+      const beef = Beef.fromBinary(settlement.transaction);
+      const txid = (beef as any).atomicTxid as string | undefined
+        ?? (beef as any).txs?.[(beef as any).txs.length - 1]?.txid;
+      if (txid == null) throw new Error('delivered BEEF has no atomic txid');
+      const btx = beef.findTxid(txid);
+      if (btx?.tx == null) throw new Error(`delivered BEEF missing tx ${txid}`);
+      const out = btx.tx.outputs[settlement.outputIndex];
+      if (out == null) throw new Error(`tx ${txid} has no output ${settlement.outputIndex}`);
+      const scriptHex = out.lockingScript.toHex();
+      const meta = parseClassicStasMetadata(scriptHex);
+      if (meta == null) throw new Error('received output is not classic STAS');
+
+      // 2. Pack the BRC-29 owner derivation into the brc42KeyId field so the
+      //    received token is re-spendable (keyID "<prefix> <suffix>",
+      //    counterparty = sender). The holdings loader decodes this back.
+      const brc42KeyId = encodeBrc29KeyId({
         derivationPrefix: settlement.customInstructions.derivationPrefix,
         derivationSuffix: settlement.customInstructions.derivationSuffix,
         senderIdentityKey: sender,
       });
 
-      const internalizeResult = await this.wallet.internalizeAction(
-        {
-          tx: settlement.transaction,
-          outputs: [
-            {
-              outputIndex: settlement.outputIndex,
-              protocol: 'basket insertion',
-              insertionRemittance: {
-                basket: STAS_BASKET,
-                customInstructions,
-                tags: ['stas', 'peer'],
-              },
-            },
-          ],
-          description: 'STAS peer receive',
-          seekPermission: false,
+      // 3. Register via the same path discovery uses — internalize (with the
+      //    delivered BEEF, no re-fetch) + satellite-table linkage + spendable.
+      const reg = new StasRegistration(this.wallet, this.identityKey, this.chain);
+      const result = await reg.register({
+        txid,
+        vout: settlement.outputIndex,
+        tokenSatoshis: out.satoshis ?? Number(settlement.amount),
+        ownerFieldHash160: meta.ownerFieldHash160,
+        brc42KeyId,
+        parsed: {
+          tokenId: settlement.assetId,
+          ownerFieldHash160: meta.ownerFieldHash160,
+          symbol: meta.symbol ?? undefined,
+          flagsHex: meta.flagsHex ?? '',
+          serviceFields: [],
+          optionalData: [],
+          freezeEnabled: false,
+          confiscationEnabled: false,
+          frozen: false,
+          actionData: {},
         } as any,
-        ORIGINATOR
-      );
+        protocol: { id: 'stas', basketName: STAS_BASKET },
+        atomicBeef: settlement.transaction,
+      });
+      if (!result.registered && result.reason !== 'already registered') {
+        return { action: 'terminate', termination: { code: 'stas.register_failed', message: result.reason ?? 'register failed' } };
+      }
 
-      return { action: 'accept', receiptData: { internalizeResult } };
+      return { action: 'accept', receiptData: { internalizeResult: result } };
     } catch (err) {
       return { action: 'terminate', termination: { code: 'stas.internalize_failed', message: errMsg(err) } };
     }

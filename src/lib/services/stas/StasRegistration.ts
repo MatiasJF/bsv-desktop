@@ -53,6 +53,13 @@ export interface RegisterStasArgs {
    * legacy callers that haven't been wired through the registry yet.
    */
   protocol?: RegistrationProtocol;
+  /**
+   * Optional pre-built AtomicBEEF to internalize. Used by the peer-receive
+   * path, which already holds the signed transfer BEEF and must NOT re-fetch
+   * a possibly-unpropagated tx from the network. When omitted, a chained
+   * AtomicBEEF is assembled from `txid` (the discovery default).
+   */
+  atomicBeef?: number[];
 }
 
 export interface RegisterStasResult {
@@ -97,7 +104,12 @@ export class StasRegistration {
     // 2. Build a chained AtomicBEEF. Walks back through inputs until every
     //    leaf input has a merkle proof; lets us internalize mempool STAS by
     //    chaining the target tx + its parents to a confirmed source.
+    //    Peer-receive supplies the BEEF directly (already delivered) so we
+    //    don't re-fetch a possibly-unpropagated tx.
     let atomicBeef: number[];
+    if (args.atomicBeef != null && args.atomicBeef.length > 0) {
+      atomicBeef = args.atomicBeef;
+    } else {
     try {
       const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid });
       atomicBeef = built.atomicBeef;
@@ -108,6 +120,7 @@ export class StasRegistration {
         vout,
         reason: `chained BEEF assembly failed: ${err instanceof Error ? err.message : String(err)}`,
       };
+    }
     }
 
     // 4. internalizeAction (basket insertion).

@@ -27,6 +27,7 @@ import { BSV21_BASKET } from '../../../constants/baskets'
 import { parseBsv21LockingScript } from '../../../services/tokens/bsv21/inscription'
 import type { IncomingToken, SendTokenParams } from '../../../services/tokens/peer/PeerTokenClient'
 import type { TokenSourceRef } from '../../../services/tokens/peer/tokenSettlementTypes'
+import { decodeBrc29KeyId } from '../../../services/tokens/peer/brc29KeyId'
 
 type ProtocolId = 'stas' | 'dstas' | 'bsv-21'
 
@@ -84,10 +85,14 @@ export default function PeerTokens() {
         const sats = Number(o.outputSatoshis ?? o.tokenSatoshis ?? 0)
         const scriptHex = o.lockingScript ?? null
         if (!scriptHex) continue
+        // A peer-received token stores its BRC-29 owner derivation in the
+        // brc42KeyId field; decode it into an explicit owner override so the
+        // transfer service can re-spend it (counterparty = original sender).
+        const brc29 = decodeBrc29KeyId(o.brc42KeyId ?? '')
         next.push({
           key: `${o.txid}.${o.vout}`,
           protocol,
-          label: `${o.symbol ?? protocol.toUpperCase()} · ${sats}`,
+          label: `${o.symbol ?? protocol.toUpperCase()} · ${sats}${brc29 ? ' (received)' : ''}`,
           amount: String(sats),
           source: {
             txid: o.txid,
@@ -97,6 +102,9 @@ export default function PeerTokens() {
             protocol,
             assetId: o.symbol ?? o.tokenId ?? protocol,
             brc42KeyId: o.brc42KeyId ?? undefined,
+            owner: brc29
+              ? { keyID: `${brc29.derivationPrefix} ${brc29.derivationSuffix}`, counterparty: brc29.senderIdentityKey }
+              : undefined,
           },
         })
       }
