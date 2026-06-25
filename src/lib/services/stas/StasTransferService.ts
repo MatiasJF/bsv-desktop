@@ -348,6 +348,29 @@ export class StasTransferService {
       }
       /* eslint-enable no-console */
 
+      // The classic STAS engine encodes exactly ONE funding outpoint into the
+      // unlock witness (input 0 is the STAS being spent; the funding input is
+      // the wallet's BSV). If the default basket only holds fragments smaller
+      // than the fee, wallet-toolbox combines several — which the engine can't
+      // accept, and you get a cryptic "OP_EQUALVERIFY required equal" deep in
+      // script eval. Fail clean with actionable guidance instead. (Mirrors the
+      // DSTAS check in DstasTransferService.)
+      const fundingInputCount = tx.inputs.length - 1;
+      if (fundingInputCount < 1) {
+        return { ok: false, reason: 'no BSV funding input found in the assembled tx' };
+      }
+      if (fundingInputCount > 1) {
+        return {
+          ok: false,
+          reason:
+            `STAS transfer requires exactly one BSV funding input, but the wallet ` +
+            `combined ${fundingInputCount} from the default basket — your BSV is ` +
+            `fragmented into amounts smaller than the fee. Consolidate by sending a ` +
+            `small BSV payment to yourself (or top up with one larger UTXO of a few ` +
+            `thousand sats), then retry the send.`,
+        };
+      }
+
       // 9. Payment segment = the wallet's added change output (now at vout 1).
       let paymentSegment: { satoshis: number; publicKey: string } | null = null;
       for (let v = 1; v < tx.outputs.length; v++) {
