@@ -60,6 +60,12 @@ export interface RegisterStasArgs {
    * AtomicBEEF is assembled from `txid` (the discovery default).
    */
   atomicBeef?: number[];
+  /**
+   * Skip the internalizeAction step and only link the satellite tables. Used
+   * when the output's basket was already declared at createAction time (a
+   * sender's own token-change), so the wallet-toolbox output row already exists.
+   */
+  skipInternalize?: boolean;
 }
 
 export interface RegisterStasResult {
@@ -123,13 +129,17 @@ export class StasRegistration {
     }
     }
 
-    // 4. internalizeAction (basket insertion).
+    // 4. internalizeAction (basket insertion). Skipped when the caller already
+    //    declared the output's basket at createAction time (e.g. a sender's own
+    //    token-change) — internalizing it again would conflict; we only need the
+    //    satellite linkage below.
     const customInstructions = JSON.stringify({
       tokenId: parsed.tokenId,
       brc42KeyId,
       flagsHex: parsed.flagsHex,
       serviceFields: parsed.serviceFields,
     });
+    if (args.skipInternalize !== true) {
     try {
       await this.wallet.internalizeAction(
         {
@@ -164,9 +174,11 @@ export class StasRegistration {
         reason: `internalizeAction failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+    }
 
     // 5. Link satellite tables. The wallet-toolbox `outputs` row was created
-    //    inside internalizeAction; we look it up by outpoint to populate ours.
+    //    inside internalizeAction (or by the caller's createAction basket
+    //    declaration when skipInternalize); we look it up by outpoint to populate ours.
     let outputId: number | undefined;
     try {
       outputId = await this.stasQuery('findOutputIdByOutpoint', [txid, vout]);

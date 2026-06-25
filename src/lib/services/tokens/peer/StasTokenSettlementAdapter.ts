@@ -128,6 +128,8 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
         recipientAddress,
         amount: sendAmt,
         senderChangeHash160: senderChange?.ownerFieldHash160,
+        senderChangeKeyId: senderChange?.keyId,
+        tokenId: source.assetId,
       });
       if (!res.ok || res.txid == null) {
         return { action: 'terminate', termination: { code: 'stas.transfer_failed', message: res.reason ?? 'transfer failed' } };
@@ -155,8 +157,12 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
               freezeEnabled: false, confiscationEnabled: false, frozen: false, actionData: {},
             } as any,
             protocol: { id: 'stas', basketName: STAS_BASKET },
-            atomicBeef: res.beef,
+            // The change output's basket was declared at createAction time, so
+            // its wallet output row already exists — only link the satellite
+            // tables (internalizing our own output again would conflict).
+            skipInternalize: true,
           });
+          ctx.logger?.log?.(`[stas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
         } catch (e) {
           ctx.logger?.warn?.(`[stas] sender token-change registration failed (scan will recover): ${String(e)}`);
         }

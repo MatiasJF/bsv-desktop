@@ -19,6 +19,7 @@
 import type { WalletInterface } from '@bsv/sdk';
 import { Beef } from '@bsv/sdk';
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
+import { STAS_BASKET } from '../../constants/baskets';
 import { stasQuery } from './stasIpc';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 
@@ -74,6 +75,15 @@ export interface StasTransferArgs {
    * key so the change is self-custodied and re-discoverable.
    */
   senderChangeHash160?: string;
+  /**
+   * BRC-42 keyId of the sender's token-change receive key. Declared in the
+   * change output's customInstructions so the wallet tracks the output at
+   * creation time (mirrors BSV-21 token-change), which is what lets the
+   * satellite linkage find its output row.
+   */
+  senderChangeKeyId?: string;
+  /** Token id for the change output's customInstructions (display/tracking). */
+  tokenId?: string;
 }
 
 export interface StasTransferResult {
@@ -325,6 +335,15 @@ export class StasTransferService {
                     lockingScript: changeStasScriptHex,
                     satoshis: changeAmt,
                     outputDescription: 'STAS token change',
+                    // Declare the basket at creation so the wallet tracks this
+                    // self-owned output natively (mirrors BSV-21 token-change);
+                    // the satellite linkage then finds its output row.
+                    basket: STAS_BASKET,
+                    customInstructions: JSON.stringify({
+                      brc42KeyId: args.senderChangeKeyId,
+                      tokenId: args.tokenId,
+                    }),
+                    tags: ['stas'],
                   }]
                 : []),
             ],
