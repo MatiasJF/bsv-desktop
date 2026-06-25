@@ -161,8 +161,13 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
             // its wallet output row already exists — only link the satellite
             // tables (internalizing our own output again would conflict).
             skipInternalize: true,
+          }).then((r) => {
+            if (r.registered || r.reason === 'already registered') {
+              ctx.logger?.log?.(`[stas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
+            } else {
+              ctx.logger?.warn?.(`[stas] sender token-change NOT registered: ${r.reason}`);
+            }
           });
-          ctx.logger?.log?.(`[stas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
         } catch (e) {
           ctx.logger?.warn?.(`[stas] sender token-change registration failed (scan will recover): ${String(e)}`);
         }

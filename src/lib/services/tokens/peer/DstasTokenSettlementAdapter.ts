@@ -137,7 +137,7 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
       if (isPartial && senderChange) {
         try {
           const parsedChange = parseDstasLockingScript(source.lockingScriptHex);
-          await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
+          const r = await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
             txid: res.txid,
             vout: 1,
             tokenSatoshis: source.satoshis - sendAmt,
@@ -147,7 +147,11 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
             protocol: { id: 'dstas', basketName: DSTAS_BASKET },
             skipInternalize: true,
           });
-          ctx.logger?.log?.(`[dstas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
+          if (r.registered || r.reason === 'already registered') {
+            ctx.logger?.log?.(`[dstas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
+          } else {
+            ctx.logger?.warn?.(`[dstas] sender token-change NOT registered: ${r.reason}`);
+          }
         } catch (e) {
           ctx.logger?.warn?.(`[dstas] sender token-change registration failed (scan will recover): ${String(e)}`);
         }

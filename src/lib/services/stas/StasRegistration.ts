@@ -112,21 +112,22 @@ export class StasRegistration {
     //    chaining the target tx + its parents to a confirmed source.
     //    Peer-receive supplies the BEEF directly (already delivered) so we
     //    don't re-fetch a possibly-unpropagated tx.
-    let atomicBeef: number[];
-    if (args.atomicBeef != null && args.atomicBeef.length > 0) {
-      atomicBeef = args.atomicBeef;
-    } else {
-    try {
-      const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid });
-      atomicBeef = built.atomicBeef;
-    } catch (err) {
-      return {
-        registered: false,
-        txid,
-        vout,
-        reason: `chained BEEF assembly failed: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
+    //    When skipInternalize is set, the BEEF is never used (we don't
+    //    internalize), so DON'T build it — building it would re-fetch the
+    //    just-broadcast tx from WoC and 404, failing the whole registration.
+    let atomicBeef: number[] = args.atomicBeef ?? [];
+    if (args.skipInternalize !== true && atomicBeef.length === 0) {
+      try {
+        const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid });
+        atomicBeef = built.atomicBeef;
+      } catch (err) {
+        return {
+          registered: false,
+          txid,
+          vout,
+          reason: `chained BEEF assembly failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
 
     // 4. internalizeAction (basket insertion). Skipped when the caller already
