@@ -103,7 +103,7 @@ export default function PeerTokens() {
             assetId: o.symbol ?? o.tokenId ?? protocol,
             brc42KeyId: o.brc42KeyId ?? undefined,
             owner: brc29
-              ? { keyID: `${brc29.derivationPrefix} ${brc29.derivationSuffix}`, counterparty: brc29.senderIdentityKey }
+              ? { keyID: `${brc29.derivationPrefix} ${brc29.derivationSuffix}`, counterparty: brc29.senderIdentityKey, forSelf: true }
               : undefined,
           },
         })

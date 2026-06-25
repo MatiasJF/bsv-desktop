@@ -56,6 +56,8 @@ export interface StasTransferArgs {
       protocolID?: [number, string];
       keyID: string;
       counterparty: string;
+      /** True for a BRC-29-received token: derive the recipient's OWN key. */
+      forSelf?: boolean;
     };
   };
   recipientAddress: string;
@@ -95,6 +97,9 @@ export class StasTransferService {
       protocolID: (source.owner?.protocolID ?? STAS_PROTOCOL_ID) as any,
       keyID: source.owner?.keyID ?? source.brc42KeyId,
       counterparty: (source.owner?.counterparty ?? STAS_COUNTERPARTY) as any,
+      // BRC-29-received tokens are owned by OUR key in the shared derivation —
+      // derive the pubkey with forSelf:true so it matches the on-chain owner.
+      forSelf: source.owner?.forSelf === true,
     };
 
     // 1. Owner pubkey via BRC-42 derivation.
@@ -105,7 +110,8 @@ export class StasTransferService {
           protocolID: ownerDerivation.protocolID,
           keyID: ownerDerivation.keyID,
           counterparty: ownerDerivation.counterparty,
-        },
+          forSelf: ownerDerivation.forSelf,
+        } as any,
         ORIGINATOR
       );
       ownerPubKey = bsv.PublicKey.fromString(publicKey);

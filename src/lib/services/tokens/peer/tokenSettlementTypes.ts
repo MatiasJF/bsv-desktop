@@ -18,8 +18,12 @@ export interface TokenSourceRef {
   protocol: string;
   assetId: string;
   brc42KeyId?: string;
-  /** Present when re-sending a BRC-29-received token (counterparty = sender). */
-  owner?: { protocolID?: [number, string]; keyID: string; counterparty: string };
+  /**
+   * Present when re-sending a BRC-29-received token. The owner key is derived
+   * with counterparty = original sender and `forSelf: true` (the recipient's
+   * OWN key in the shared derivation, which is what owns the UTXO).
+   */
+  owner?: { protocolID?: [number, string]; keyID: string; counterparty: string; forSelf?: boolean };
   [key: string]: unknown;
 }
 

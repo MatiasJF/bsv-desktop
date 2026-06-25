@@ -73,6 +73,8 @@ export interface DstasTransferArgs {
       protocolID?: [number, string]
       keyID: string
       counterparty: string
+      /** True for a BRC-29-received token: derive the recipient's OWN key. */
+      forSelf?: boolean
     }
   }
   recipientAddress: string
@@ -142,6 +144,7 @@ export class DstasTransferService {
       protocolID: (source.owner?.protocolID ?? STAS_PROTOCOL_ID) as any,
       keyID: source.owner?.keyID ?? source.brc42KeyId,
       counterparty: (source.owner?.counterparty ?? STAS_COUNTERPARTY) as any,
+      forSelf: source.owner?.forSelf === true,
     }
 
     let ownerPubKeyHex: string
@@ -151,7 +154,8 @@ export class DstasTransferService {
           protocolID: ownerDerivation.protocolID,
           keyID: ownerDerivation.keyID,
           counterparty: ownerDerivation.counterparty,
-        },
+          forSelf: ownerDerivation.forSelf,
+        } as any,
         ORIGINATOR
       )
       ownerPubKeyHex = publicKey

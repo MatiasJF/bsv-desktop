@@ -64,6 +64,8 @@ export interface BSV21TransferArgs {
       protocolID?: [number, string];
       keyID: string;
       counterparty: string;
+      /** True for a BRC-29-received token: derive the recipient's OWN key. */
+      forSelf?: boolean;
     };
   };
   /** Amount of tokens (raw integer units) to send. */
@@ -359,6 +361,7 @@ export class BSV21TransferService {
       protocolID: (source.owner?.protocolID ?? BSV21_PROTOCOL_ID) as any,
       keyID: source.owner?.keyID ?? source.brc42KeyId,
       counterparty: (source.owner?.counterparty ?? BSV21_COUNTERPARTY) as any,
+      forSelf: source.owner?.forSelf === true,
     };
     try {
       const sourceLocking = bsv.Script.fromHex(source.scriptHex);
@@ -386,6 +389,7 @@ export class BSV21TransferService {
           protocolID: ownerDerivation.protocolID,
           keyID: ownerDerivation.keyID,
           counterparty: ownerDerivation.counterparty,
+          forSelf: ownerDerivation.forSelf,
         } as any,
         ORIGINATOR
       );
