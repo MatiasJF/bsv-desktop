@@ -223,8 +223,10 @@ export default function PeerTokens() {
         console.log('[PeerTokens] DRY RUN preview', token)
       } else {
         console.log('[PeerTokens] LIVE send', params.protocol, params.amount, '→', params.recipient.slice(0, 16), '…')
-        await peerTokens.sendToken(params)
-        toast.success(`Sent ${selected.protocol} token to ${recipient.slice(0, 12)}…`)
+        const sent = await peerTokens.sendToken(params)
+        const woc = (network === 'mainnet' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/') + (sent?.txid ?? '')
+        console.log(`[PeerTokens] sent ${selected.protocol} — txid: ${sent?.txid}  ${woc}`)
+        toast.success(`Sent ${selected.protocol} ✓ txid ${sent?.txid ? sent.txid.slice(0, 16) + '…' : '(pending)'}`)
         await loadHoldings()
       }
     } catch (e: any) {

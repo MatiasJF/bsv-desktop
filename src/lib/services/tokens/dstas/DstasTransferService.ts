@@ -509,6 +509,9 @@ export class DstasTransferService {
         }
       }
 
+      const wocBase = this.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/'
+      // eslint-disable-next-line no-console
+      console.log(`[dstas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`)
       return { ok: true, txid: signResp?.txid, beef: signResp?.tx }
     } finally {
       await restoreBasket()

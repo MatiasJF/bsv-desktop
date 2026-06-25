@@ -177,6 +177,7 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
           assetId: source.assetId,
           amount,
           outputIndex: 0, // STAS engine places the recipient output at vout 0
+          txid: res.txid,
         },
       };
     } catch (err) {

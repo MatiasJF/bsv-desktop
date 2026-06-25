@@ -493,6 +493,9 @@ export class BSV21TransferService {
       }
     }
 
+    const wocBase = this.deps.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/';
+    // eslint-disable-next-line no-console
+    console.log(`[bsv-21 transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`);
     return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
   }
 }

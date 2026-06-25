@@ -45,6 +45,8 @@ export interface TokenToken {
   customInstructions: { derivationPrefix: string; derivationSuffix: string };
   transaction: number[];
   outputIndex?: number;
+  /** Broadcast txid of the transfer (for explorer links). */
+  txid?: string;
 }
 
 export interface IncomingToken {
@@ -140,21 +142,23 @@ export class PeerTokenClient extends MessageBoxClient {
       customInstructions: artifact.customInstructions,
       transaction: artifact.transaction,
       outputIndex: artifact.outputIndex,
+      txid: artifact.txid,
     };
   }
 
-  async sendToken(params: SendTokenParams, hostOverride?: string): Promise<void> {
+  async sendToken(params: SendTokenParams, hostOverride?: string): Promise<TokenToken> {
     if (!params.recipient || params.recipient.trim() === '') {
       throw new Error('Invalid token transfer: recipient is required');
     }
     log.log('sendToken: building settlement (this signs + broadcasts the transfer)…');
     const token = await this.createTokenToken(params);
-    log.log(`sendToken: settlement built (beef ${token.transaction.length} bytes); delivering via MessageBox to host ${hostOverride ?? this.tokenHost}…`);
+    log.log(`sendToken: settlement built (txid ${token.txid}, beef ${token.transaction.length} bytes); delivering via MessageBox to host ${hostOverride ?? this.tokenHost}…`);
     await this.sendMessage(
       { recipient: params.recipient, messageBox: this.tokenMessageBox, body: JSON.stringify(token) },
       hostOverride ?? this.tokenHost
     );
     log.log('sendToken: MessageBox delivery complete.');
+    return token;
   }
 
   async sendLiveToken(params: SendTokenParams, overrideHost?: string): Promise<void> {

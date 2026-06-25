@@ -132,6 +132,7 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
           assetId: source.assetId,
           amount,
           outputIndex: 0, // DSTAS transfer places the recipient output at vout 0
+          txid: res.txid,
         },
       };
     } catch (err) {

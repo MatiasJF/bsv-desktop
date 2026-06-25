@@ -34,6 +34,8 @@ export interface TokenSettlementArtifact {
   assetId: string;
   amount: string;
   outputIndex: number;
+  /** Broadcast txid of the transfer (for explorer links / diagnostics). */
+  txid?: string;
 }
 
 export interface TokenAdapterContext {

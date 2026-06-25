@@ -122,6 +122,7 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
           assetId: source.assetId,
           amount,
           outputIndex: 0, // recipient BSV-21 output is built first
+          txid: res.txid,
         },
       };
     } catch (err) {
