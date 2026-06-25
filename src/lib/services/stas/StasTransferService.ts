@@ -61,6 +61,19 @@ export interface StasTransferArgs {
     };
   };
   recipientAddress: string;
+  /**
+   * Token amount (satoshis) to send to the recipient. Defaults to the full
+   * `source.satoshis` (1-to-1 transfer). When less than the full value, the
+   * service performs a SPLIT: a recipient STAS output of `amount` plus a
+   * sender token-change STAS output of the remainder (to `senderChangeHash160`).
+   */
+  amount?: number;
+  /**
+   * Owner pkh (hex) for the sender's token-change STAS output. Required when
+   * `amount` < `source.satoshis`. Derived from the sender's own STAS receive
+   * key so the change is self-custodied and re-discoverable.
+   */
+  senderChangeHash160?: string;
 }
 
 export interface StasTransferResult {
@@ -166,11 +179,30 @@ export class StasTransferService {
       };
     }
 
-    // 4. Build new STAS locking script.
+    // 3b. Resolve send amount vs. token-change (SPLIT). Full-value send keeps
+    //     the original 1-output path byte-for-byte; a partial send adds a
+    //     second STAS output carrying the remainder back to the sender.
+    const sendAmt = args.amount ?? source.satoshis;
+    const changeAmt = source.satoshis - sendAmt;
+    if (!Number.isInteger(sendAmt) || sendAmt < 1) {
+      return { ok: false, reason: `invalid amount ${sendAmt} (must be a positive integer ≤ ${source.satoshis})` };
+    }
+    if (changeAmt < 0) {
+      return { ok: false, reason: `amount ${sendAmt} exceeds the token UTXO value ${source.satoshis}` };
+    }
+    if (changeAmt > 0 && !args.senderChangeHash160) {
+      return { ok: false, reason: 'partial transfer requires senderChangeHash160 for the token-change output' };
+    }
+
+    // 4. Build new STAS locking script(s): recipient + (optional) sender change.
     let newStasScriptHex: string;
+    let changeStasScriptHex: string | null = null;
     let stasVersion: number;
     try {
       newStasScriptHex = updateStasScript(recipientPkhHex, sh);
+      if (changeAmt > 0 && args.senderChangeHash160) {
+        changeStasScriptHex = updateStasScript(args.senderChangeHash160, sh);
+      }
       stasVersion = getVersion(sh);
     } catch (err) {
       return {
@@ -285,9 +317,16 @@ export class StasTransferService {
             outputs: [
               {
                 lockingScript: newStasScriptHex,
-                satoshis: source.satoshis,
+                satoshis: sendAmt,
                 outputDescription: 'STAS to recipient',
               },
+              ...(changeStasScriptHex != null
+                ? [{
+                    lockingScript: changeStasScriptHex,
+                    satoshis: changeAmt,
+                    outputDescription: 'STAS token change',
+                  }]
+                : []),
             ],
             description: 'STAS transfer',
             options: {
@@ -386,8 +425,10 @@ export class StasTransferService {
         partialSTASUnlockingScript(
           tx,
           [
-            { satoshis: source.satoshis, publicKey: recipientPkhHex },
-            null,
+            { satoshis: sendAmt, publicKey: recipientPkhHex },
+            changeStasScriptHex != null && args.senderChangeHash160
+              ? { satoshis: changeAmt, publicKey: args.senderChangeHash160 }
+              : null,
             paymentSegment,
           ],
           stasVersion,

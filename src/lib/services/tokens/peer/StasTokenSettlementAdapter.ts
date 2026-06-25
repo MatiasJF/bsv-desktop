@@ -18,6 +18,7 @@
 import type { WalletInterface } from '@bsv/sdk';
 import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { StasTransferService } from '../../stas/StasTransferService';
+import { StasKeyDeriver } from '../../stas/StasKeyDeriver';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { StasRegistration } from '../../stas/StasRegistration';
 import { parseClassicStasMetadata } from '../../stas/parseClassicStasMetadata';
@@ -73,16 +74,17 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenBuildResult> {
     const { recipient, source, amount } = args;
 
-    // v1 supports full-value transfer only (classic STAS amount == satoshis).
-    if (amount !== String(source.satoshis)) {
+    // Classic STAS is satoshi-denominated; the send amount must be a positive
+    // integer ≤ the UTXO value. A partial send SPLITS: recipient gets `amount`,
+    // the remainder returns to the sender as token change.
+    const sendAmt = Number(amount);
+    if (!Number.isInteger(sendAmt) || sendAmt < 1 || sendAmt > source.satoshis) {
       return {
         action: 'terminate',
-        termination: {
-          code: 'stas.partial_unsupported',
-          message: `classic STAS peer transfer is full-value only (amount=${amount}, utxo=${source.satoshis})`,
-        },
+        termination: { code: 'stas.bad_amount', message: `amount must be an integer between 1 and ${source.satoshis} (got ${amount})` },
       };
     }
+    const isPartial = sendAmt < source.satoshis;
 
     try {
       const derivationPrefix = await createNonce(this.wallet, 'self', ctx.originator);
@@ -91,7 +93,7 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
 
       // Dry run: prove derivation + validation only — never touch the chain.
       if (ctx.dryRun) {
-        ctx.logger?.log(`[stas dry-run] would transfer ${amount} to ${recipientAddress}`);
+        ctx.logger?.log(`[stas dry-run] would transfer ${amount}${isPartial ? ` (split, change ${source.satoshis - sendAmt})` : ''} to ${recipientAddress}`);
         return {
           action: 'settle',
           artifact: {
@@ -105,6 +107,14 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
         };
       }
 
+      // For a partial send, derive a self-owned STAS receive key for the token
+      // change so the sender keeps (and can see/re-spend) the remainder.
+      let senderChange: { ownerFieldHash160: string; keyId: string } | undefined;
+      if (isPartial) {
+        const ctxRow = await new StasKeyDeriver(this.wallet, this.identityKey, this.chain).createNextReceiveContext();
+        senderChange = { ownerFieldHash160: ctxRow.ownerFieldHash160, keyId: ctxRow.keyId };
+      }
+
       const transfer = new StasTransferService(this.wallet, this.identityKey, this.chain);
       const res = await transfer.transfer({
         source: {
@@ -116,9 +126,40 @@ export class StasTokenSettlementAdapter implements TokenSettlementAdapter {
           owner: source.owner,
         },
         recipientAddress,
+        amount: sendAmt,
+        senderChangeHash160: senderChange?.ownerFieldHash160,
       });
       if (!res.ok || res.txid == null) {
         return { action: 'terminate', termination: { code: 'stas.transfer_failed', message: res.reason ?? 'transfer failed' } };
+      }
+
+      // Register the sender's token-change output (vout 1) into the satellite
+      // tables so the remaining balance shows immediately. Best-effort: the
+      // discovery scan would also find it. The change is self-owned, so it
+      // registers with the normal recv key (no BRC-29 override).
+      if (isPartial && senderChange) {
+        try {
+          const meta = parseClassicStasMetadata(source.lockingScriptHex);
+          await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
+            txid: res.txid,
+            vout: 1,
+            tokenSatoshis: source.satoshis - sendAmt,
+            ownerFieldHash160: senderChange.ownerFieldHash160,
+            brc42KeyId: senderChange.keyId,
+            parsed: {
+              tokenId: source.assetId,
+              ownerFieldHash160: senderChange.ownerFieldHash160,
+              symbol: meta?.symbol ?? undefined,
+              flagsHex: meta?.flagsHex ?? '',
+              serviceFields: [], optionalData: [],
+              freezeEnabled: false, confiscationEnabled: false, frozen: false, actionData: {},
+            } as any,
+            protocol: { id: 'stas', basketName: STAS_BASKET },
+            atomicBeef: res.beef,
+          });
+        } catch (e) {
+          ctx.logger?.warn?.(`[stas] sender token-change registration failed (scan will recover): ${String(e)}`);
+        }
       }
 
       // Prefer the signed AtomicBEEF the wallet already returned (no re-fetch

@@ -199,8 +199,8 @@ export default function PeerTokens() {
   const startSend = () => {
     if (!selected) return toast.error('Pick a token to send')
     if (!recipient.trim()) return toast.error('Enter a recipient identity key')
-    if (selected.protocol !== 'bsv-21' && amount !== selected.amount) {
-      return toast.error('STAS/DSTAS are full-value only in this version — amount must equal the UTXO')
+    if (selected.protocol === 'dstas' && amount !== selected.amount) {
+      return toast.error('DSTAS is full-value only in this version — amount must equal the UTXO')
     }
     setConfirmOpen(true)
   }
@@ -317,8 +317,8 @@ export default function PeerTokens() {
           <TextField fullWidth label="Recipient identity key" value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="03…" />
           <TextField
             fullWidth label="Amount (token units)" value={amount} onChange={(e) => setAmount(e.target.value)}
-            disabled={!!selected && selected.protocol !== 'bsv-21'}
-            helperText={selected && selected.protocol !== 'bsv-21' ? 'Full-value only for STAS/DSTAS in this version' : 'BSV-21 supports partial amounts'}
+            disabled={!!selected && selected.protocol === 'dstas'}
+            helperText={selected?.protocol === 'dstas' ? 'Full-value only for DSTAS in this version' : 'Partial amounts supported (STAS splits; BSV-21 makes change)'}
           />
           <FormControlLabel
             control={<Switch checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />}
