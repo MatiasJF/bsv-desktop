@@ -130,10 +130,16 @@ export default function PeerTokens() {
         const sym = tagValue(o.tags, 'sym') ?? parsed?.sym
         let ci: any = {}
         try { ci = o.customInstructions ? JSON.parse(o.customInstructions) : {} } catch { /* */ }
+        // A peer-received BSV-21 stores its BRC-29 owner derivation in
+        // customInstructions (scheme:'brc29'); decode it into an owner override
+        // (counterparty = sender, forSelf:true) so it's re-spendable.
+        const bsv21Brc29 = ci?.scheme === 'brc29' && ci.derivationPrefix && ci.senderIdentityKey
+          ? { keyID: `${ci.derivationPrefix} ${ci.derivationSuffix}`, counterparty: ci.senderIdentityKey as string, forSelf: true }
+          : undefined
         next.push({
           key: `${txid}.${voutStr}`,
           protocol: 'bsv-21',
-          label: `${sym ?? 'BSV-21'} · ${amt}`,
+          label: `${sym ?? 'BSV-21'} · ${amt}${bsv21Brc29 ? ' (received)' : ''}`,
           amount: String(amt),
           source: {
             txid,
@@ -143,6 +149,7 @@ export default function PeerTokens() {
             protocol: 'bsv-21',
             assetId: tokenId,
             brc42KeyId: ci.keyID ?? ci.brc42KeyId ?? undefined,
+            owner: bsv21Brc29,
             tokenId,
             amt,
             dec: tagValue(o.tags, 'dec') ? Number(tagValue(o.tags, 'dec')) : parsed?.dec,

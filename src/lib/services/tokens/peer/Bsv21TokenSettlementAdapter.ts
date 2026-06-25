@@ -13,9 +13,10 @@
  * ./tokenSettlementTypes) until @bsv/message-box-client publishes it.
  */
 import type { WalletInterface } from '@bsv/sdk';
-import { Hash, Utils, createNonce } from '@bsv/sdk';
+import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { BSV21TransferService, type BSV21TransferDeps } from '../bsv21/BSV21TransferService';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
+import { parseBsv21LockingScript } from '../bsv21/inscription';
 import { BSV21_PROTOCOL_ID } from '../bsv21/constants';
 import { BSV21_BASKET } from '../../../constants/baskets';
 import type {
@@ -134,6 +135,26 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenAcceptResult> {
     const { sender, settlement } = args;
     try {
+      // Parse the received inscription from the delivered BEEF so the holding
+      // displays with its amount/symbol (BSV-21 holdings are read from the
+      // basket tags, unlike STAS/DSTAS which use the satellite tables).
+      let amt = settlement.amount;
+      let dec: number | undefined;
+      let sym: string | undefined;
+      let icon: string | undefined;
+      try {
+        const beef = Beef.fromBinary(settlement.transaction);
+        const txid = (beef as any).atomicTxid as string | undefined
+          ?? (beef as any).txs?.[(beef as any).txs.length - 1]?.txid;
+        const btx = txid != null ? beef.findTxid(txid) : undefined;
+        const out = btx?.tx?.outputs[settlement.outputIndex];
+        const parsed = out != null ? parseBsv21LockingScript(out.lockingScript.toHex()) : null;
+        if (parsed != null) { amt = parsed.amt; dec = parsed.dec; sym = parsed.sym; icon = parsed.icon; }
+      } catch { /* fall back to settlement.amount */ }
+
+      // Store the BRC-29 owner derivation so the received token is re-spendable
+      // (the holdings loader decodes scheme:'brc29' into a source.owner override
+      // with counterparty = sender, forSelf:true).
       const customInstructions = JSON.stringify({
         scheme: 'brc29',
         kind: 'bsv-21',
@@ -142,6 +163,11 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
         derivationSuffix: settlement.customInstructions.derivationSuffix,
         senderIdentityKey: sender,
       });
+
+      const tags = ['bsv21', 'peer', `id:${settlement.assetId}`, `amt:${amt}`];
+      if (dec !== undefined) tags.push(`dec:${dec}`);
+      if (sym !== undefined) tags.push(`sym:${sym}`);
+      if (icon !== undefined) tags.push(`icon:${icon}`);
 
       const internalizeResult = await this.wallet.internalizeAction(
         {
@@ -153,7 +179,7 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
               insertionRemittance: {
                 basket: BSV21_BASKET,
                 customInstructions,
-                tags: ['bsv21', 'peer', `id:${settlement.assetId}`],
+                tags,
               },
             },
           ],
