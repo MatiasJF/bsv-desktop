@@ -35,6 +35,7 @@ import { fromHex, toHex } from 'dxs-bsv-token-sdk/bsv'
 import * as DstasLockingBuilderModule from 'dxs-bsv-token-sdk/script/build/dstas-locking-builder'
 const { buildDstasLockingScript } = DstasLockingBuilderModule
 import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from '../../stas/constants'
+import { DSTAS_BASKET } from '../../../constants/baskets'
 import { parseDstasLockingScript } from '../../stas/dstasParser'
 import { stasQuery } from '../../stas/stasIpc'
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef'
@@ -78,6 +79,18 @@ export interface DstasTransferArgs {
     }
   }
   recipientAddress: string
+  /**
+   * Token amount (satoshis) to send. Defaults to the full `source.satoshis`.
+   * When less, the service SPLITS: recipient DSTAS output of `amount` + a
+   * sender token-change DSTAS output of the remainder (to `senderChangeHash160`).
+   */
+  amount?: number
+  /** Owner pkh (hex) for the sender's token-change DSTAS output (partial sends). */
+  senderChangeHash160?: string
+  /** BRC-42 keyId of the sender's change receive key (for createAction tracking). */
+  senderChangeKeyId?: string
+  /** Token id for the change output's customInstructions. */
+  tokenId?: string
 }
 
 export interface DstasTransferResult {
@@ -177,21 +190,36 @@ export class DstasTransferService {
     //    propagates from the source (redemptionPkh, flags,
     //    serviceFields, optionalData byte-exact per §7 invariant).
     //    Fresh transfer → actionData: null, frozen: false.
+    // Resolve send amount vs. token change (SPLIT). Full-value keeps the
+    // single-output path; partial adds a sender token-change DSTAS output.
+    const sendAmt = args.amount ?? source.satoshis
+    const changeAmt = source.satoshis - sendAmt
+    if (!Number.isInteger(sendAmt) || sendAmt < 1 || changeAmt < 0) {
+      return { ok: false, reason: `invalid amount ${sendAmt} (must be 1..${source.satoshis})` }
+    }
+    if (changeAmt > 0 && !args.senderChangeHash160) {
+      return { ok: false, reason: 'partial DSTAS transfer requires senderChangeHash160' }
+    }
+
     let newDstasScriptHex: string
+    let changeDstasScriptHex: string | null = null
     try {
       const flagsBytes = fromHex(parsed.flagsHex || '00')
       const serviceFields = parsed.serviceFields.map((s) => fromHex(s))
       const optionalData = parsed.optionalData.map((s) => fromHex(s))
-      const lockingBytes = buildDstasLockingScript({
-        ownerPkh: fromHex(recipientPkhHex),
+      const buildFor = (ownerPkhHex: string) => toHex(buildDstasLockingScript({
+        ownerPkh: fromHex(ownerPkhHex),
         redemptionPkh: fromHex(parsed.tokenId),
         flags: flagsBytes,
         serviceFields,
         optionalData,
         actionData: null,
         frozen: false,
-      })
-      newDstasScriptHex = toHex(lockingBytes)
+      }))
+      newDstasScriptHex = buildFor(recipientPkhHex)
+      if (changeAmt > 0 && args.senderChangeHash160) {
+        changeDstasScriptHex = buildFor(args.senderChangeHash160)
+      }
     } catch (err) {
       return { ok: false, reason: `build new DSTAS locking script: ${errMsg(err)}` }
     }
@@ -276,9 +304,24 @@ export class DstasTransferService {
             outputs: [
               {
                 lockingScript: newDstasScriptHex,
-                satoshis: source.satoshis,
+                satoshis: sendAmt,
                 outputDescription: 'DSTAS to recipient',
               },
+              ...(changeDstasScriptHex != null
+                ? [{
+                    lockingScript: changeDstasScriptHex,
+                    satoshis: changeAmt,
+                    outputDescription: 'DSTAS token change',
+                    // Declare the basket so the wallet tracks this self-owned
+                    // change output natively (mirrors STAS/BSV-21 change).
+                    basket: DSTAS_BASKET,
+                    customInstructions: JSON.stringify({
+                      brc42KeyId: args.senderChangeKeyId,
+                      tokenId: args.tokenId,
+                    }),
+                    tags: ['dstas'],
+                  }]
+                : []),
             ],
             description: 'DSTAS transfer',
             options: { randomizeOutputs: false },

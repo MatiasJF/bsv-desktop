@@ -18,6 +18,7 @@
 import type { WalletInterface } from '@bsv/sdk';
 import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { DstasTransferService } from '../dstas/DstasTransferService';
+import { StasKeyDeriver } from '../../stas/StasKeyDeriver';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { StasRegistration } from '../../stas/StasRegistration';
 import { parseDstasLockingScript } from '../../stas/dstasParser';
@@ -71,16 +72,16 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
   ): Promise<TokenBuildResult> {
     const { recipient, source, amount } = args;
 
-    // v1 supports full-value transfer only (DSTAS spending-type 1, 1-to-1).
-    if (amount !== String(source.satoshis)) {
+    // DSTAS is satoshi-denominated; a partial send SPLITS (recipient + sender
+    // token-change), like STAS.
+    const sendAmt = Number(amount);
+    if (!Number.isInteger(sendAmt) || sendAmt < 1 || sendAmt > source.satoshis) {
       return {
         action: 'terminate',
-        termination: {
-          code: 'dstas.partial_unsupported',
-          message: `DSTAS peer transfer is full-value only (amount=${amount}, utxo=${source.satoshis})`,
-        },
+        termination: { code: 'dstas.bad_amount', message: `amount must be an integer between 1 and ${source.satoshis} (got ${amount})` },
       };
     }
+    const isPartial = sendAmt < source.satoshis;
 
     try {
       const derivationPrefix = await createNonce(this.wallet, 'self', ctx.originator);
@@ -89,7 +90,7 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
 
       // Dry run: prove derivation + validation only — never touch the chain.
       if (ctx.dryRun) {
-        ctx.logger?.log(`[dstas dry-run] would transfer ${amount} to ${recipientAddress}`);
+        ctx.logger?.log(`[dstas dry-run] would transfer ${amount}${isPartial ? ` (split, change ${source.satoshis - sendAmt})` : ''} to ${recipientAddress}`);
         return {
           action: 'settle',
           artifact: {
@@ -103,6 +104,14 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
         };
       }
 
+      // Partial: derive a self-owned receive key (DSTAS shares the STAS
+      // namespace) for the token change.
+      let senderChange: { ownerFieldHash160: string; keyId: string } | undefined;
+      if (isPartial) {
+        const ctxRow = await new StasKeyDeriver(this.wallet, this.identityKey, this.chain).createNextReceiveContext();
+        senderChange = { ownerFieldHash160: ctxRow.ownerFieldHash160, keyId: ctxRow.keyId };
+      }
+
       const transfer = new DstasTransferService(this.wallet, this.identityKey, this.chain, this.relay);
       const res = await transfer.transfer({
         source: {
@@ -114,9 +123,34 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
           owner: source.owner,
         },
         recipientAddress,
+        amount: sendAmt,
+        senderChangeHash160: senderChange?.ownerFieldHash160,
+        senderChangeKeyId: senderChange?.keyId,
+        tokenId: source.assetId,
       });
       if (!res.ok || res.txid == null) {
         return { action: 'terminate', termination: { code: 'dstas.transfer_failed', message: res.reason ?? 'transfer failed' } };
+      }
+
+      // Register the sender's token-change DSTAS output (vout 1) — basket was
+      // declared at createAction, so only link the satellite tables.
+      if (isPartial && senderChange) {
+        try {
+          const parsedChange = parseDstasLockingScript(source.lockingScriptHex);
+          await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
+            txid: res.txid,
+            vout: 1,
+            tokenSatoshis: source.satoshis - sendAmt,
+            ownerFieldHash160: senderChange.ownerFieldHash160,
+            brc42KeyId: senderChange.keyId,
+            parsed: { ...(parsedChange ?? {}), ownerFieldHash160: senderChange.ownerFieldHash160, tokenId: source.assetId } as any,
+            protocol: { id: 'dstas', basketName: DSTAS_BASKET },
+            skipInternalize: true,
+          });
+          ctx.logger?.log?.(`[dstas] registered sender token-change (vout 1, ${source.satoshis - sendAmt})`);
+        } catch (e) {
+          ctx.logger?.warn?.(`[dstas] sender token-change registration failed (scan will recover): ${String(e)}`);
+        }
       }
 
       const transaction = (res.beef && res.beef.length > 0)
