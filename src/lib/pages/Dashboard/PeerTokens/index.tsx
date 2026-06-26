@@ -78,12 +78,6 @@ export default function PeerTokens() {
     // STAS + DSTAS via IPC.
     try {
       const rows: any[] = (await stasQuery(identityKey, chain, 'listStasOutputs', [])) ?? []
-      // eslint-disable-next-line no-console
-      console.log('[PeerTokens] listStasOutputs:', rows.length, 'rows; dstas:',
-        rows.filter((r) => r.protocol === 'dstas').map((r) => ({
-          txid: String(r.txid ?? '').slice(0, 10), vout: r.vout,
-          sats: r.outputSatoshis ?? r.tokenSatoshis, spendable: r.spendable, hasScript: !!r.lockingScript,
-        })))
       for (const o of rows) {
         if (o?.spendable === false) continue
         const protocol: ProtocolId = (o.protocol as ProtocolId) ?? 'stas'
