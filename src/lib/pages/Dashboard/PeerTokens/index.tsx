@@ -22,27 +22,8 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import { toast } from 'react-toastify'
 import { WalletContext } from '../../../WalletContext'
-import { stasQuery } from '../../../services/stas/stasIpc'
-import { BSV21_BASKET } from '../../../constants/baskets'
-import { parseBsv21LockingScript } from '../../../services/tokens/bsv21/inscription'
 import type { IncomingToken, SendTokenParams } from '../../../services/tokens/peer/PeerTokenClient'
-import type { TokenSourceRef } from '../../../services/tokens/peer/tokenSettlementTypes'
-import { decodeBrc29KeyId } from '../../../services/tokens/peer/brc29KeyId'
-
-type ProtocolId = 'stas' | 'dstas' | 'bsv-21'
-
-interface Holding {
-  key: string
-  protocol: ProtocolId
-  label: string
-  amount: string // token units as string (STAS/DSTAS = satoshis; BSV-21 = raw amt)
-  source: TokenSourceRef
-}
-
-function tagValue(tags: string[] | undefined, key: string): string | undefined {
-  const hit = (tags ?? []).find((t) => t.startsWith(`${key}:`))
-  return hit ? hit.slice(key.length + 1) : undefined
-}
+import { loadPeerHoldings, type PeerHolding as Holding } from '../../../services/tokens/peer/loadPeerHoldings'
 
 export default function PeerTokens() {
   const ctx = useContext(WalletContext) as any
@@ -74,95 +55,13 @@ export default function PeerTokens() {
   const loadHoldings = useCallback(async () => {
     if (!wallet || !identityKey) return
     setLoadingHoldings(true)
-    const next: Holding[] = []
-    // STAS + DSTAS via IPC.
     try {
-      const rows: any[] = (await stasQuery(identityKey, chain, 'listStasOutputs', [])) ?? []
-      for (const o of rows) {
-        if (o?.spendable === false) continue
-        const protocol: ProtocolId = (o.protocol as ProtocolId) ?? 'stas'
-        if (protocol !== 'stas' && protocol !== 'dstas') continue
-        const sats = Number(o.outputSatoshis ?? o.tokenSatoshis ?? 0)
-        const scriptHex = o.lockingScript ?? null
-        if (!scriptHex) continue
-        // A peer-received token stores its BRC-29 owner derivation in the
-        // brc42KeyId field; decode it into an explicit owner override so the
-        // transfer service can re-spend it (counterparty = original sender).
-        const brc29 = decodeBrc29KeyId(o.brc42KeyId ?? '')
-        next.push({
-          key: `${o.txid}.${o.vout}`,
-          protocol,
-          label: `${o.symbol ?? protocol.toUpperCase()} · ${sats}${brc29 ? ' (received)' : ''}`,
-          amount: String(sats),
-          source: {
-            txid: o.txid,
-            outputIndex: Number(o.vout),
-            lockingScriptHex: scriptHex,
-            satoshis: sats,
-            protocol,
-            assetId: o.symbol ?? o.tokenId ?? protocol,
-            brc42KeyId: o.brc42KeyId ?? undefined,
-            owner: brc29
-              ? { keyID: `${brc29.derivationPrefix} ${brc29.derivationSuffix}`, counterparty: brc29.senderIdentityKey, forSelf: true }
-              : undefined,
-          },
-        })
-      }
+      setHoldings(await loadPeerHoldings({ wallet, identityKey, chain, originator }))
     } catch (e) {
-      console.warn('[PeerTokens] listStasOutputs failed', e)
+      console.warn('[PeerTokens] loadPeerHoldings failed', e)
+    } finally {
+      setLoadingHoldings(false)
     }
-    // BSV-21 via listOutputs on the basket.
-    try {
-      const res: any = await wallet.listOutputs({
-        basket: BSV21_BASKET,
-        includeTags: true,
-        includeCustomInstructions: true,
-        include: 'locking scripts',
-        limit: 200,
-      }, originator)
-      for (const o of res?.outputs ?? []) {
-        const [txid, voutStr] = String(o.outpoint ?? '.').split('.')
-        const scriptHex = o.lockingScript ?? null
-        if (!scriptHex) continue
-        const parsed = parseBsv21LockingScript(scriptHex)
-        const tokenId = tagValue(o.tags, 'id') ?? parsed?.id ?? ''
-        const amt = tagValue(o.tags, 'amt') ?? parsed?.amt ?? '0'
-        const sym = tagValue(o.tags, 'sym') ?? parsed?.sym
-        let ci: any = {}
-        try { ci = o.customInstructions ? JSON.parse(o.customInstructions) : {} } catch { /* */ }
-        // A peer-received BSV-21 stores its BRC-29 owner derivation in
-        // customInstructions (scheme:'brc29'); decode it into an owner override
-        // (counterparty = sender, forSelf:true) so it's re-spendable.
-        const bsv21Brc29 = ci?.scheme === 'brc29' && ci.derivationPrefix && ci.senderIdentityKey
-          ? { keyID: `${ci.derivationPrefix} ${ci.derivationSuffix}`, counterparty: ci.senderIdentityKey as string, forSelf: true }
-          : undefined
-        next.push({
-          key: `${txid}.${voutStr}`,
-          protocol: 'bsv-21',
-          label: `${sym ?? 'BSV-21'} · ${amt}${bsv21Brc29 ? ' (received)' : ''}`,
-          amount: String(amt),
-          source: {
-            txid,
-            outputIndex: Number(voutStr),
-            lockingScriptHex: scriptHex,
-            satoshis: Number(o.satoshis ?? 1),
-            protocol: 'bsv-21',
-            assetId: tokenId,
-            brc42KeyId: ci.keyID ?? ci.brc42KeyId ?? undefined,
-            owner: bsv21Brc29,
-            tokenId,
-            amt,
-            dec: tagValue(o.tags, 'dec') ? Number(tagValue(o.tags, 'dec')) : parsed?.dec,
-            sym,
-            icon: tagValue(o.tags, 'icon') ?? parsed?.icon,
-          },
-        })
-      }
-    } catch (e) {
-      console.warn('[PeerTokens] listOutputs(bsv-21) failed', e)
-    }
-    setHoldings(next)
-    setLoadingHoldings(false)
   }, [wallet, identityKey, chain, originator])
 
   // ── Incoming ──────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ import { buildPermissionModuleRegistry } from './permissionModules/registry'
 import type { PermissionModuleDefinition, PermissionPromptHandler } from './permissionModules/types'
 import type { GroupPermissionRequest, CounterpartyPermissionRequest } from './types/GroupedPermissions'
 import type { WalletProfile } from './types/WalletProfile'
-import { setStasForHttpRoute, setStasTransferEnqueuer, setBsv21DiscoveryForHttpRoute } from '../onWalletReady'
+import { setStasForHttpRoute, setStasTransferEnqueuer, setBsv21DiscoveryForHttpRoute, setPeerTokensForHttpRoute } from '../onWalletReady'
 import type { StasTransferRequest } from './types/StasTransferRequest'
 import { RequestInterceptorWallet } from './RequestInterceptorWallet'
 import { updateRecentApp } from './pages/Dashboard/Apps/getApps'
@@ -446,6 +446,21 @@ export const WalletContextProvider: React.FC<WalletContextProps> = ({
     // the AssetsPage Refresh button — which queries the 1Sat overlay's
     // per-address SSE stream and covers organic receive end-to-end.
     setBsv21DiscoveryForHttpRoute(stas?.bsv21Discovery ?? null)
+
+    // Peer-token routes (Phase B) — the standalone web page drives this
+    // wallet over /peerToken/*. The page references holdings by outpoint;
+    // source resolution + key derivation stay here behind the HTTP boundary.
+    if (stas?.peerTokens && stas.keyDeriver) {
+      setPeerTokensForHttpRoute({
+        client: stas.peerTokens,
+        wallet: managers.permissionsManager,
+        identityKey: stas.keyDeriver.identityKey,
+        chain: stas.keyDeriver.chain,
+        originator: ADMIN_ORIGINATOR,
+      })
+    } else {
+      setPeerTokensForHttpRoute(null)
+    }
 
     // No cleanup — IPC listener is permanent, wallet ref is swapped not re-registered
   }, [managers?.permissionsManager, activeProfile?.id, onWalletReady])

@@ -1,4 +1,5 @@
 import { stasQuery } from './lib/services/stas/stasIpc';
+import { loadPeerHoldings } from './lib/services/tokens/peer/loadPeerHoldings';
 import {
   WalletInterface,
   CreateActionArgs,
@@ -184,6 +185,20 @@ type StasTransferPermissionArgs = {
 let _currentStasTransferEnqueuer:
   | ((args: StasTransferPermissionArgs) => Promise<boolean>)
   | null = null;
+/**
+ * Peer-token client bundle exposed to the `/peerToken/*` routes (Phase B).
+ * The standalone web page drives the tester's own wallet through these:
+ * identity, holdings, send, incoming, accept. `client` is the vendored
+ * PeerTokenClient; wallet/identityKey/chain/originator let the routes
+ * re-resolve a holding's full source from just an outpoint.
+ */
+let _currentPeerTokensBundle: {
+  client: any;
+  wallet: WalletInterface;
+  identityKey: string;
+  chain: 'main' | 'test';
+  originator?: string;
+} | null = null;
 let _listenerRegistered = false;
 
 /** Test-only: read current wallet ref */
@@ -249,6 +264,23 @@ export function setStasTransferEnqueuer(
   fn: ((args: StasTransferPermissionArgs) => Promise<boolean>) | null
 ): void {
   _currentStasTransferEnqueuer = fn;
+}
+
+/**
+ * Inject (or clear) the peer-token client bundle used by the `/peerToken/*`
+ * routes (Phase B standalone web page). Set from WalletContext alongside
+ * setStasForHttpRoute once the WalletService's StasServices snapshot is ready.
+ */
+export function setPeerTokensForHttpRoute(
+  bundle: {
+    client: any;
+    wallet: WalletInterface;
+    identityKey: string;
+    chain: 'main' | 'test';
+    originator?: string;
+  } | null
+): void {
+  _currentPeerTokensBundle = bundle;
 }
 
 /**
@@ -1478,6 +1510,140 @@ export const onWalletReady = async (
               status: 500,
               body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }),
             };
+          }
+          break;
+        }
+
+        // ── Peer-token routes (Phase B) ─────────────────────────────────────
+        // Drive the tester's own wallet from a standalone web page:
+        //   GET  /peerToken/identity  → { identityKey }
+        //   GET  /peerToken/holdings  → { holdings: [{ outpoint, protocol, label, amount, assetId }] }
+        //   POST /peerToken/send      → { outpoint, recipient, amount, dryRun? }
+        //   GET  /peerToken/incoming  → { incoming: [...] }
+        //   POST /peerToken/accept    → { messageId }
+        // Source resolution (incl. BRC-29 owner derivation) stays server-side:
+        // the page references a holding by outpoint and never sees key material.
+
+        case '/peerToken/identity': {
+          if (!_currentPeerTokensBundle) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Peer tokens not ready' }) };
+            break;
+          }
+          response = {
+            request_id: req.request_id,
+            status: 200,
+            body: JSON.stringify({ identityKey: _currentPeerTokensBundle.identityKey }),
+          };
+          break;
+        }
+
+        case '/peerToken/holdings': {
+          if (!_currentPeerTokensBundle) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Peer tokens not ready' }) };
+            break;
+          }
+          try {
+            const { wallet: w, identityKey, chain, originator } = _currentPeerTokensBundle;
+            const holdings = await loadPeerHoldings({ wallet: w, identityKey, chain, originator });
+            response = {
+              request_id: req.request_id,
+              status: 200,
+              body: JSON.stringify({
+                holdings: holdings.map((h) => ({
+                  outpoint: h.key,
+                  protocol: h.protocol,
+                  label: h.label,
+                  amount: h.amount,
+                  assetId: h.source.assetId,
+                })),
+              }),
+            };
+          } catch (e) {
+            response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) };
+          }
+          break;
+        }
+
+        case '/peerToken/send': {
+          if (!_currentPeerTokensBundle) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Peer tokens not ready' }) };
+            break;
+          }
+          try {
+            const { client, wallet: w, identityKey, chain, originator } = _currentPeerTokensBundle;
+            const { outpoint, recipient, amount, dryRun } = (req.body ? JSON.parse(req.body) : {}) as {
+              outpoint?: string; recipient?: string; amount?: string | number; dryRun?: boolean;
+            };
+            if (!outpoint || !recipient) {
+              response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: 'outpoint and recipient are required' }) };
+              break;
+            }
+            // Re-resolve the full source (incl. owner override) from the outpoint.
+            const holdings = await loadPeerHoldings({ wallet: w, identityKey, chain, originator });
+            const holding = holdings.find((h) => h.key === outpoint);
+            if (!holding) {
+              response = { request_id: req.request_id, status: 404, body: JSON.stringify({ error: `holding ${outpoint} not found (already spent or wrong wallet)` }) };
+              break;
+            }
+            const params = {
+              recipient: String(recipient).trim(),
+              protocol: holding.protocol,
+              source: holding.source,
+              amount: String(amount ?? holding.amount),
+            };
+            if (dryRun) {
+              const token = await client.createTokenToken(params, true);
+              response = { request_id: req.request_id, status: 200, body: JSON.stringify({ dryRun: true, token }) };
+            } else {
+              const sent = await client.sendToken(params);
+              response = { request_id: req.request_id, status: 200, body: JSON.stringify({ dryRun: false, txid: sent?.txid ?? null, token: sent }) };
+            }
+          } catch (e) {
+            response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) };
+          }
+          break;
+        }
+
+        case '/peerToken/incoming': {
+          if (!_currentPeerTokensBundle) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Peer tokens not ready' }) };
+            break;
+          }
+          try {
+            const incoming = await _currentPeerTokensBundle.client.listIncomingTokens();
+            response = { request_id: req.request_id, status: 200, body: JSON.stringify({ incoming }) };
+          } catch (e) {
+            response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) };
+          }
+          break;
+        }
+
+        case '/peerToken/accept': {
+          if (!_currentPeerTokensBundle) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Peer tokens not ready' }) };
+            break;
+          }
+          try {
+            const { client } = _currentPeerTokensBundle;
+            const { messageId } = (req.body ? JSON.parse(req.body) : {}) as { messageId?: string };
+            if (!messageId) {
+              response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: 'messageId is required' }) };
+              break;
+            }
+            const incoming = await client.listIncomingTokens();
+            const tok = incoming.find((t: any) => t.messageId === messageId);
+            if (!tok) {
+              response = { request_id: req.request_id, status: 404, body: JSON.stringify({ error: `incoming token ${messageId} not found` }) };
+              break;
+            }
+            const r = await client.acceptToken(tok);
+            if (typeof r === 'string') {
+              response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: r }) };
+            } else {
+              response = { request_id: req.request_id, status: 200, body: JSON.stringify({ accepted: true, protocol: tok.token?.protocol }) };
+            }
+          } catch (e) {
+            response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) };
           }
           break;
         }
