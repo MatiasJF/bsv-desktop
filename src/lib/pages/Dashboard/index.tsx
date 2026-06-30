@@ -7,7 +7,9 @@ import { makeStyles } from '@mui/styles';
 import {
   Typography,
   IconButton,
-  Toolbar
+  Toolbar,
+  Alert,
+  Button
 } from '@mui/material';
 import PageLoading from '../../components/PageLoading';
 import ErrorBoundary from '../../components/ErrorBoundary';
@@ -49,8 +51,14 @@ export default function Dashboard() {
   const history = useHistory();
   const breakpoints = useBreakpoint();
 
-  // On first load, redirect to Onboarding if the wallet has zero balance
+  // Funding/activation model: a zero-balance wallet is RECEIVE-ONLY, not broken.
+  // Instead of hard-redirecting to the funding bridge (a wall before the user
+  // ever sees their wallet), we land them in the dashboard and surface a
+  // non-blocking "not activated yet" banner. They can receive/activate when
+  // ready; sending is gated downstream until a UTXO arrives.
+  const [isUnfunded, setIsUnfunded] = useState(false);
   useEffect(() => {
+    let cancelled = false;
     const checkBalance = async () => {
       if (!managers?.permissionsManager) return;
       try {
@@ -58,15 +66,14 @@ export default function Dashboard() {
           { basket: 'default', limit: 1 },
           adminOriginator
         ) as { totalOutputs: number };
-        if (result.totalOutputs === 0) {
-          history.push('/dashboard/legacybridge');
-        }
+        if (!cancelled) setIsUnfunded(result.totalOutputs === 0);
       } catch {
         // silently ignore — don't block the user
       }
     };
     checkBalance();
-  }, []);
+    return () => { cancelled = true; };
+  }, [managers?.permissionsManager, adminOriginator]);
   const classes = useStyles({ breakpoints });
   const menuRef = useRef(null);
   const [menuOpen, setMenuOpen] = useState(true);
@@ -114,6 +121,19 @@ export default function Dashboard() {
       </div>
       <Menu menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} />
       <div className={classes.page_container}>
+        {isUnfunded && (
+          <Alert
+            severity="info"
+            sx={{ mx: 2, mt: 2 }}
+            action={
+              <Button color="inherit" size="small" onClick={() => history.push('/dashboard/legacybridge')}>
+                Add funds
+              </Button>
+            }
+          >
+            Your wallet isn’t activated yet — add your first satoshi to start sending. You can receive right away.
+          </Alert>
+        )}
         <ErrorBoundary>
           <Switch>
           <Route

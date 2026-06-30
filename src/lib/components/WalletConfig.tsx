@@ -19,7 +19,7 @@ import {
 import SettingsIcon from '@mui/icons-material/Settings';
 import CloseIcon from '@mui/icons-material/Close';
 import { toast } from 'react-toastify';
-import { DEFAULT_CHAIN } from '../config';
+import { DEFAULT_CHAIN, DEFAULT_WAB_URL, DEFAULT_STORAGE_URL, MESSAGEBOX_HOST } from '../config';
 import { WalletContext, WABConfig, LoginType } from '../WalletContext';
 
 interface WalletConfigProps {
@@ -41,8 +41,8 @@ const WalletConfig: React.FC<WalletConfigProps> = ({ autoExpand = false, hideLog
   const [showWalletConfig, setShowWalletConfig] = useState(autoExpand)
   const isControlled = open !== undefined
   const configVisible = isControlled ? open : showWalletConfig
-  const [wabUrl, setWabUrl] = useState<string>('')
-  const [messageBoxUrl, setMessageBoxUrl] = useState<string>('')
+  const [wabUrl, setWabUrl] = useState<string>(DEFAULT_WAB_URL)
+  const [messageBoxUrl, setMessageBoxUrl] = useState<string>(MESSAGEBOX_HOST)
   const [wabInfo, setWabInfo] = useState<{
     supportedAuthMethods: string[];
     faucetEnabled: boolean;
@@ -50,7 +50,7 @@ const WalletConfig: React.FC<WalletConfigProps> = ({ autoExpand = false, hideLog
   } | null>(null)
   const [method, setMethod] = useState<string>("")
   const [network, setNetwork] = useState<'main' | 'test'>(DEFAULT_CHAIN)
-  const [storageUrl, setStorageUrl] = useState<string>('')
+  const [storageUrl, setStorageUrl] = useState<string>(DEFAULT_STORAGE_URL)
   const [loginType, setLoginType] = useState<LoginType>(contextLoginType)
   const [useRemoteStorage, setUseRemoteStorage] = useState<boolean>(false)
   const [useMessageBox, setUseMessageBox] = useState<boolean>(false)
