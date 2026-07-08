@@ -57,6 +57,8 @@ import {
   BSV21TransferService,
   BSV21DiscoveryService,
 } from './tokens'
+import { WocTokenIndexerClient } from './tokens/woc/WocTokenIndexerClient'
+import { getTokenDiscoverySource } from './tokens/discoverySource'
 import { DstasTransferService } from './tokens/dstas/DstasTransferService'
 import { PeerTokenClient } from './tokens/peer/PeerTokenClient'
 import { StasTokenSettlementAdapter } from './tokens/peer/StasTokenSettlementAdapter'
@@ -622,17 +624,28 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       tokens.register(new DstasProtocolAdapter(dstasTransfer))
       tokens.register(new BSV21ProtocolAdapter(bsv21Transfer))
 
+      // Token discovery source (default 'woc'). WOC is one provider for all
+      // three standards: STAS + DSTAS ride StasDiscoveryService, BSV-21 rides
+      // BSV21DiscoveryService — both fed by the same WocTokenIndexerClient.
+      // 'legacy' falls back to Bitails (STAS) + relay (DSTAS) + 1Sat overlay
+      // (BSV-21) as a one-release rollback net. See tokens/discoverySource.ts.
+      const discoverySource = getTokenDiscoverySource()
+      const wocIndexer =
+        discoverySource === 'woc' ? new WocTokenIndexerClient({ chain }) : undefined
+
       const stasDiscovery = new StasDiscoveryService({
         deriver: stasKeyDeriver,
-        indexer: new IndexerClient(),
+        indexer: wocIndexer ?? new IndexerClient(),
         registration: stasRegistration,
         wallet,
         registry: tokens,
-        relay,
+        // WOC discovers DSTAS organically (getDstasUtxosForOwners), so the
+        // relay-assist is only wired in legacy mode.
+        relay: discoverySource === 'woc' ? undefined : relay,
       })
       const bsv21Discovery = new BSV21DiscoveryService({
         deriver: bsv21KeyDeriver,
-        indexer: bsv21Indexer,
+        indexer: wocIndexer ?? bsv21Indexer,
         registration: bsv21Registration,
         wallet,
       })

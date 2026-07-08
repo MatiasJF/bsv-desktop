@@ -19,7 +19,7 @@ import { STAS_GAP_LIMIT } from './constants';
 import type { ParsedDstas } from './dstasParser';
 import type { StasKeyDeriver } from './StasKeyDeriver';
 import type { StasRegistration } from './StasRegistration';
-import type { IndexerClient } from './IndexerClient';
+import type { WocUtxo } from './IndexerClient';
 import { stasQuery } from './stasIpc';
 import { TOKEN_BASKETS } from '../../constants/baskets';
 import type { TokenProtocolRegistry, ParsedTokenOutput } from '../tokens';
@@ -73,9 +73,25 @@ export interface ScanResult {
   spendableFlipped?: number;
 }
 
+/**
+ * Per-address token indexer the discovery loop pulls from. Both the legacy
+ * `IndexerClient` (Bitails, STAS only) and the new `WocTokenIndexerClient`
+ * (WOC, all standards) satisfy this. `getDstasUtxosForOwners` is optional:
+ * only the WOC client provides organic DSTAS discovery — in legacy mode
+ * DSTAS still arrives via the relay-assist block below.
+ */
+export interface StasDiscoveryIndexer {
+  getUtxosForAddresses(
+    addresses: string[]
+  ): Promise<Array<{ address: string; utxos: WocUtxo[] }>>;
+  getDstasUtxosForOwners?(
+    ownerHash160s: string[]
+  ): Promise<Array<{ ownerHash160: string; utxos: WocUtxo[] }>>;
+}
+
 export interface StasDiscoveryDeps {
   deriver: StasKeyDeriver;
-  indexer: IndexerClient;
+  indexer: StasDiscoveryIndexer;
   registration: StasRegistration;
   /** Wallet exposing `getServices()` (wallet-toolbox Wallet). */
   wallet: any;
@@ -251,11 +267,43 @@ export class StasDiscoveryService {
     }
     result.scannedAddresses = addressToHash.size;
 
-    // 3. Bulk WoC UTXO scan.
+    // 3. WOC token UTXO scan. STAS is queried per base58 address; DSTAS per
+    //    owner hash160 (WOC's DSTAS endpoint keys on the raw hash160, not
+    //    base58). Both are merged into one work-list of {owner, keyIndex,
+    //    utxos} so the per-UTXO registration loop below is shared. In legacy
+    //    mode the injected indexer has no `getDstasUtxosForOwners`, so DSTAS
+    //    arrives via the relay-assist block (step 5) instead.
     const addresses = [...addressToHash.keys()];
-    const scanned = await this.deps.indexer.getUtxosForAddresses(addresses);
+    const stasScanned = await this.deps.indexer.getUtxosForAddresses(addresses);
 
-    // 4. Walk each UTXO: fetch tx, parse output script, match, register.
+    type OwnerUtxos = {
+      ownerHash160Hex: string | undefined;
+      ownerKeyIndex: number | undefined;
+      utxos: WocUtxo[];
+    };
+    const work: OwnerUtxos[] = stasScanned.map(({ address, utxos }) => {
+      const owner = addressToHash.get(address);
+      return {
+        ownerHash160Hex: owner,
+        ownerKeyIndex: owner ? ownerMap.get(owner) : undefined,
+        utxos,
+      };
+    });
+
+    if (typeof this.deps.indexer.getDstasUtxosForOwners === 'function') {
+      const dstasScanned = await this.deps.indexer.getDstasUtxosForOwners([...ownerMap.keys()]);
+      for (const { ownerHash160, utxos } of dstasScanned) {
+        if (utxos.length === 0) continue;
+        work.push({
+          ownerHash160Hex: ownerHash160,
+          ownerKeyIndex: ownerMap.get(ownerHash160),
+          utxos,
+        });
+      }
+    }
+
+    // 4. Walk each UTXO: parse the output script (from the indexer's
+    //    scriptHex when present, else fetch the tx), match ownership, register.
     const services = (this.deps.wallet as any).getServices?.();
     if (!services) {
       result.errors.push({ message: 'wallet.getServices() unavailable' });
@@ -263,15 +311,11 @@ export class StasDiscoveryService {
     }
     const txCache = new Map<string, Transaction>();
 
-    for (const { address, utxos } of scanned) {
-      // The indexer is queried per-derived-address, so every UTXO it returns
-      // is owned by THIS address by construction. We use that mapping as the
-      // ultimate source of truth: if the registry's parse doesn't recover an
-      // owner hash160 (e.g. a classic STAS whose CreateContract walkback
-      // fails), the address-binding still tells us which key owns it.
-      const ownerHash160Hex = addressToHash.get(address);
-      const ownerKeyIndex = ownerHash160Hex ? ownerMap.get(ownerHash160Hex) : undefined;
-
+    // Each work entry is bound to one owner hash160 by construction (the
+    // indexer was queried per-derived-address / per-owner). That mapping is
+    // the ownership fallback: if an adapter's parse can't recover an owner
+    // hash160, the binding still tells us which key owns the UTXO.
+    for (const { ownerHash160Hex, ownerKeyIndex, utxos } of work) {
       for (const utxo of utxos) {
         result.candidates++;
         try {
@@ -292,32 +336,40 @@ export class StasDiscoveryService {
             // Channel error: best-effort; let registration handle the duplicate.
           }
 
-          // Fetch tx once per txid.
-          let tx = txCache.get(utxo.txid);
-          if (!tx) {
-            const rawTxRes = await services.getRawTx(utxo.txid);
-            if (!rawTxRes?.rawTx) {
+          // Prefer the indexer-supplied locking script (WOC `?script=true`)
+          // to skip a per-txid getRawTx just for parsing. Registration still
+          // fetches the BEEF / merkle proof via wallet.getServices() below.
+          let lockingScriptHex: string;
+          if (utxo.scriptHex) {
+            lockingScriptHex = utxo.scriptHex;
+          } else {
+            // Fetch tx once per txid.
+            let tx = txCache.get(utxo.txid);
+            if (!tx) {
+              const rawTxRes = await services.getRawTx(utxo.txid);
+              if (!rawTxRes?.rawTx) {
+                result.errors.push({
+                  txid: utxo.txid,
+                  vout: utxo.vout,
+                  message: rawTxRes?.error?.message ?? 'getRawTx returned no rawTx',
+                });
+                continue;
+              }
+              tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
+              txCache.set(utxo.txid, tx);
+            }
+
+            const out = tx.outputs[utxo.vout];
+            if (!out) {
               result.errors.push({
                 txid: utxo.txid,
                 vout: utxo.vout,
-                message: rawTxRes?.error?.message ?? 'getRawTx returned no rawTx',
+                message: 'output index out of range',
               });
               continue;
             }
-            tx = Transaction.fromBinary(rawTxRes.rawTx as number[]);
-            txCache.set(utxo.txid, tx);
+            lockingScriptHex = out.lockingScript.toHex();
           }
-
-          const out = tx.outputs[utxo.vout];
-          if (!out) {
-            result.errors.push({
-              txid: utxo.txid,
-              vout: utxo.vout,
-              message: 'output index out of range',
-            });
-            continue;
-          }
-          const lockingScriptHex = out.lockingScript.toHex();
 
           // Ask the registry to recognise the script. Each adapter is asked
           // in registration order; the first that returns a parsed payload

@@ -18,7 +18,7 @@
 import { Transaction } from '@bsv/sdk';
 import { Address, fromHex } from 'dxs-bsv-token-sdk/bsv';
 import type { BSV21KeyDeriver } from './BSV21KeyDeriver';
-import type { OneSatIndexerClient, IndexedOutput } from './OneSatIndexerClient';
+import type { IndexedOutput } from './OneSatIndexerClient';
 import type { BSV21Registration } from './BSV21Registration';
 import { BSV21_GAP_LIMIT } from './constants';
 import { parseBsv21LockingScript } from './inscription';
@@ -39,9 +39,19 @@ export interface Bsv21ScanResult {
   spendableFlipped?: number;
 }
 
+/**
+ * Per-address BSV-21 indexer the discovery loop pulls from. Both the legacy
+ * `OneSatIndexerClient` (1Sat overlay SSE) and the new `WocTokenIndexerClient`
+ * (WOC per-address unspent) satisfy this — the scan consumes `IndexedOutput`
+ * rows the same way regardless of source.
+ */
+export interface Bsv21DiscoveryIndexer {
+  getOwnedTxos(address: string): Promise<IndexedOutput[]>;
+}
+
 export interface BSV21DiscoveryDeps {
   deriver: BSV21KeyDeriver;
-  indexer: OneSatIndexerClient;
+  indexer: Bsv21DiscoveryIndexer;
   registration: BSV21Registration;
   /** Wallet exposing `getServices()` (wallet-toolbox Wallet). */
   wallet: any;
