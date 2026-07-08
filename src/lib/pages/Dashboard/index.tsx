@@ -32,7 +32,6 @@ import ProtocolAccess from './ProtocolAccess'; // Assuming index.jsx or similar
 import CounterpartyAccess from './CounterpartyAccess'; // Assuming index.jsx or similar
 import CertificateAccess from './CertificateAccess'; // Assuming index.jsx or similar
 import { WalletContext } from '../../WalletContext';
-import StasDebugPanel from './StasDebugPanel';
 import BasketsPage from './BasketsPage';
 import AssetsPage from './AssetsPage';
 // @ts-expect-error - Type issues with makeStyles
@@ -138,10 +137,6 @@ export default function Dashboard() {
           <Route
             path='/dashboard/assets'
             component={AssetsPage}
-          />
-          <Route
-            path='/dashboard/stas'
-            component={StasDebugPanel}
           />
           <Route
             path='/dashboard/baskets'

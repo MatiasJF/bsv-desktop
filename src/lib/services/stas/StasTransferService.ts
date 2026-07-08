@@ -316,6 +316,7 @@ export class StasTransferService {
       try {
         createRes = await this.wallet.createAction(
           {
+            labels: ['peertoken'],
             inputBEEF,
             inputs: [
               {

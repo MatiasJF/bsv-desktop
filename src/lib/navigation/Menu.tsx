@@ -13,7 +13,6 @@ import {
   AccountBalanceWallet as PaymentsIcon,
 } from '@mui/icons-material'
 import SyncAltIcon from '@mui/icons-material/SyncAlt';
-import TokenIcon from '@mui/icons-material/Token';
 import InventoryIcon from '@mui/icons-material/Inventory';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
 import VerifiedUserIcon from '@mui/icons-material/VerifiedUser'
@@ -761,26 +760,6 @@ export default function Menu({ menuOpen, setMenuOpen, menuRef }: MenuProps) {
                   fontWeight={history.location.pathname === '/dashboard/assets' ? 600 : 400}
                 >
                   Assets
-                </Typography>
-              }
-            />
-          </ListItemButton>
-
-          <ListItemButton
-            onClick={() => navigation.push('/dashboard/stas')}
-            selected={history.location.pathname === '/dashboard/stas'}
-            sx={menuItemStyle(history.location.pathname === '/dashboard/stas')}
-          >
-            <ListItemIcon sx={{ minWidth: 40, color: history.location.pathname === '/dashboard/stas' ? 'primary.main' : 'inherit' }}>
-              <TokenIcon />
-            </ListItemIcon>
-            <ListItemText
-              primary={
-                <Typography
-                  variant="body1"
-                  fontWeight={history.location.pathname === '/dashboard/stas' ? 600 : 400}
-                >
-                  STAS (dev)
                 </Typography>
               }
             />

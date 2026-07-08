@@ -290,6 +290,7 @@ export class DstasTransferService {
       try {
         createRes = await this.wallet.createAction(
           {
+            labels: ['peertoken'],
             inputBEEF,
             inputs: [
               {

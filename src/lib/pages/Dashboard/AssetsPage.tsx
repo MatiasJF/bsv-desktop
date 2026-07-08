@@ -6,8 +6,8 @@
  * UTXOs, with explicit Send and Receive flows.
  *
  * Reads + writes through the same internal services the Apps API (Task 7a)
- * exposes externally. The dev panel stays available at /dashboard/stas for
- * scan / register / debug; this page is the user-facing surface.
+ * exposes externally. This page is the user-facing surface. (The former
+ * StasDebugPanel dev route has been retired from navigation.)
  */
 
 import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react'

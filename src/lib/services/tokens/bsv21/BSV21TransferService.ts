@@ -307,6 +307,7 @@ export class BSV21TransferService {
     try {
       createRes = await wallet.createAction(
         {
+          labels: ['peertoken'],
           inputBEEF,
           inputs: [
             {
