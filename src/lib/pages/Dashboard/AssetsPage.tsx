@@ -264,6 +264,27 @@ function hash160ToAddress(hash160Hex: string): string {
   return new (Address as any)(fromHex(hash160Hex)).Value as string
 }
 
+/**
+ * Collapse a stored brc42KeyId into a compact ownership label. Self-owned
+ * outputs carry a clean `recv N`; a peer-received (BRC-29) output stores the
+ * full `brc29|prefix|suffix|senderIdentityKey` derivation — far too long for a
+ * chip — so we show a short "received" badge with the full string on hover.
+ */
+function ownershipLabel(
+  brc42KeyId: string | null
+): { short: string; full: string; peer: boolean } | null {
+  if (!brc42KeyId) return null
+  if (brc42KeyId.startsWith('brc29|')) {
+    const sender = brc42KeyId.split('|')[3] ?? ''
+    return {
+      short: 'received',
+      full: `Peer-received (BRC-29)${sender ? ` · sender ${sender.slice(0, 16)}…` : ''}`,
+      peer: true,
+    }
+  }
+  return { short: brc42KeyId, full: `Self-owned · ${brc42KeyId}`, peer: false }
+}
+
 export default function AssetsPage() {
   const { wallet, stas } = useContext(WalletContext)
 
@@ -272,7 +293,13 @@ export default function AssetsPage() {
   const [activityExpanded, setActivityExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
-  const [scanSummary, setScanSummary] = useState<string | null>(null)
+  const [scanStats, setScanStats] = useState<
+    | {
+        rows: { label: string; found: number; registered: number; known: number; errors: number }[]
+        failed?: string
+      }
+    | null
+  >(null)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
@@ -287,12 +314,12 @@ export default function AssetsPage() {
   const [sendTarget, setSendTarget] = useState<OutputView | null>(null)
   const [sendRecipient, setSendRecipient] = useState('')
   /**
-   * For BSV-21 only: the amount of tokens to send (raw integer string,
-   * pre-decimals). Empty string = full UTXO. STAS/DSTAS ignore this and
-   * always send the whole UTXO (their transfer engines aren't change-aware
-   * at this layer).
+   * Amount to send. Empty string = full UTXO. For STAS/DSTAS it's an integer
+   * number of token satoshis (≤ source satoshis); for BSV-21 it's raw token
+   * units (pre-decimals). A partial amount SPLITS: the recipient gets `amount`
+   * and the remainder returns to the sender as token-change.
    */
-  const [sendBsv21Amount, setSendBsv21Amount] = useState('')
+  const [sendAmount, setSendAmount] = useState('')
   const [sending, setSending] = useState(false)
   const [sendResult, setSendResult] = useState<{ ok: boolean; message: string } | null>(null)
 
@@ -410,33 +437,38 @@ export default function AssetsPage() {
       return
     }
     setScanning(true)
-    setScanSummary(null)
+    setScanStats(null)
     try {
-      // Run STAS / DSTAS first (per-address Bitails scan), then BSV-21
-      // (per-address 1Sat REST). Sequential so error attribution is clear
-      // in the summary line below.
+      // Run STAS / DSTAS first (one merged WOC scan), then BSV-21. Sequential
+      // so error attribution stays clear in the summary chips below.
       const stasRes = await stas.discovery.scan()
-      const bits: string[] = []
-      bits.push(`STAS: ${stasRes.candidates ?? 0} found`)
-      if ((stasRes.registered ?? 0) > 0) bits.push(`${stasRes.registered} new`)
-      if ((stasRes.skippedAlreadyKnown ?? 0) > 0) bits.push(`${stasRes.skippedAlreadyKnown} known`)
-      if ((stasRes.deferred ?? 0) > 0) bits.push(`${stasRes.deferred} deferred`)
-      if ((stasRes.errors?.length ?? 0) > 0) bits.push(`${stasRes.errors.length} errors`)
-
+      const rows = [
+        {
+          label: 'STAS / DSTAS',
+          found: stasRes.candidates ?? 0,
+          registered: stasRes.registered ?? 0,
+          known: stasRes.skippedAlreadyKnown ?? 0,
+          errors: stasRes.errors?.length ?? 0,
+        },
+      ]
+      let failed: string | undefined
       if (stas.bsv21Discovery) {
         try {
           const bsv21Res = await stas.bsv21Discovery.scan()
-          bits.push(`· BSV-21: ${bsv21Res.candidates ?? 0} found`)
-          if ((bsv21Res.registered ?? 0) > 0) bits.push(`${bsv21Res.registered} new`)
-          if ((bsv21Res.skippedAlreadyKnown ?? 0) > 0) bits.push(`${bsv21Res.skippedAlreadyKnown} known`)
-          if ((bsv21Res.errors?.length ?? 0) > 0) bits.push(`${bsv21Res.errors.length} errors`)
+          rows.push({
+            label: 'BSV-21',
+            found: bsv21Res.candidates ?? 0,
+            registered: bsv21Res.registered ?? 0,
+            known: bsv21Res.skippedAlreadyKnown ?? 0,
+            errors: bsv21Res.errors?.length ?? 0,
+          })
         } catch (e) {
-          bits.push(`· BSV-21 scan failed: ${e instanceof Error ? e.message : String(e)}`)
+          failed = `BSV-21 scan failed: ${e instanceof Error ? e.message : String(e)}`
         }
       }
-      setScanSummary(bits.join(' · '))
+      setScanStats({ rows, failed })
     } catch (e) {
-      setScanSummary(`scan failed: ${e instanceof Error ? e.message : String(e)}`)
+      setScanStats({ rows: [], failed: `Scan failed: ${e instanceof Error ? e.message : String(e)}` })
     } finally {
       setScanning(false)
     }
@@ -548,9 +580,10 @@ export default function AssetsPage() {
   const openSend = (o: OutputView) => {
     setSendTarget(o)
     setSendRecipient('')
-    // Pre-fill BSV-21 amount with the full UTXO so the default behavior
-    // matches the pre-F4 "send everything" UX. User can edit down.
-    setSendBsv21Amount(o.protocol === 'bsv-21' ? o.tokenAmount : '')
+    // Pre-fill the amount with the full balance so the default is "send
+    // everything" (editable down to split). STAS/DSTAS are satoshi-denominated;
+    // BSV-21 uses raw token units.
+    setSendAmount(o.protocol === 'bsv-21' ? o.tokenAmount : String(o.satoshis))
     setSendResult(null)
   }
 
@@ -567,8 +600,7 @@ export default function AssetsPage() {
     setSending(true)
     setSendResult(null)
     try {
-      // Build the cross-protocol args; for BSV-21 attach the extras the
-      // adapter needs (token id + amounts + display metadata).
+      // Build the cross-protocol args; per-protocol amount handling below.
       const baseArgs = {
         source: {
           txid: sendTarget.txid,
@@ -580,10 +612,12 @@ export default function AssetsPage() {
         recipientAddress: sendRecipient.trim(),
       }
       let args: any = baseArgs
+      let isPartial = false
+
       if (sendTarget.protocol === 'bsv-21') {
         // BSV-21 amount is a raw bigint string; validated here at the UI
         // boundary so the transfer service can trust its input.
-        const raw = sendBsv21Amount.trim() || sendTarget.tokenAmount
+        const raw = sendAmount.trim() || sendTarget.tokenAmount
         if (!/^\d+$/.test(raw)) {
           setSendResult({ ok: false, message: 'Amount must be a non-negative integer (raw token units).' })
           setSending(false)
@@ -609,6 +643,7 @@ export default function AssetsPage() {
           setSending(false)
           return
         }
+        isPartial = sendAmtBig < sourceAmtBig
         // BSV21TransferService builds a token-change output when sendAmt < sourceAmt.
         const extras: Bsv21SendExtras = {
           tokenId: sendTarget.tokenId,
@@ -619,11 +654,52 @@ export default function AssetsPage() {
           icon: sendTarget.icon ?? undefined,
         }
         args = { ...baseArgs, ...extras }
+      } else {
+        // STAS / DSTAS — satoshi-denominated. A blank amount (or the full
+        // balance) sends the whole UTXO; a smaller amount SPLITS, and we derive
+        // a self-owned change receive context so the remainder stays spendable
+        // (mirrors the peer settlement adapter).
+        const raw = sendAmount.trim()
+        if (raw) {
+          if (!/^\d+$/.test(raw)) {
+            setSendResult({ ok: false, message: 'Amount must be a positive integer (token sats).' })
+            setSending(false)
+            return
+          }
+          const amt = Number(raw)
+          if (amt <= 0 || amt > sendTarget.satoshis) {
+            setSendResult({ ok: false, message: `Amount must be between 1 and ${sendTarget.satoshis.toLocaleString()} sats.` })
+            setSending(false)
+            return
+          }
+          if (amt < sendTarget.satoshis) {
+            isPartial = true
+            if (!stas.keyDeriver) {
+              setSendResult({ ok: false, message: 'Key deriver unavailable — cannot build token-change for a partial send.' })
+              setSending(false)
+              return
+            }
+            const ctxRow = await stas.keyDeriver.createNextReceiveContext()
+            args = {
+              ...baseArgs,
+              amount: amt,
+              senderChangeHash160: ctxRow.ownerFieldHash160,
+              senderChangeKeyId: ctxRow.keyId,
+              tokenId: sendTarget.tokenId || undefined,
+            }
+          }
+        }
       }
+
       const result = await adapter.transfer(args)
       if (result.ok) {
-        setSendResult({ ok: true, message: `Broadcast ✓ txid=${result.txid}` })
-        loadHoldings()
+        setSendResult({
+          ok: true,
+          message: `Broadcast ✓ txid=${result.txid}${isPartial ? ' · change returns to your wallet on the next scan' : ''}`,
+        })
+        // A partial send creates a new self-owned change output; re-scan so it
+        // gets discovered + registered. Whole sends just refresh local state.
+        if (isPartial) handleScan(); else loadHoldings()
       } else {
         setSendResult({ ok: false, message: result.reason ?? 'transfer failed' })
       }
@@ -651,29 +727,32 @@ export default function AssetsPage() {
       <Card sx={{ mb: 2 }}>
         <CardContent>
           <Stack
-            direction='row'
+            direction={{ xs: 'column', md: 'row' }}
             justifyContent='space-between'
-            alignItems='flex-start'
+            alignItems={{ xs: 'stretch', md: 'flex-start' }}
             spacing={2}
           >
-            <Box>
+            <Box sx={{ minWidth: 0 }}>
               <Typography variant='h5' sx={{ fontWeight: 600 }}>
                 Assets
               </Typography>
               <Typography variant='body2' color='text.secondary' sx={{ mt: 0.5 }}>
-                STAS tokens held by this wallet — grouped by token, expandable to see each UTXO.
+                Tokens held by this wallet — grouped by token, expandable to see each UTXO.
               </Typography>
-              <Stack direction='row' spacing={2} sx={{ mt: 2 }}>
+              <Stack direction='row' spacing={1} flexWrap='wrap' useFlexGap sx={{ mt: 2 }}>
                 <Chip
+                  size='small'
                   icon={<TokenIcon />}
                   label={`${allGroups.length} ${allGroups.length === 1 ? 'token' : 'tokens'}`}
                 />
                 <Chip
+                  size='small'
                   label={`${holdings.length} ${holdings.length === 1 ? 'output' : 'outputs'}`}
                   variant='outlined'
                 />
                 <Chip
-                  label={`${totalSats.toLocaleString()} sats total`}
+                  size='small'
+                  label={`${totalSats.toLocaleString()} sats`}
                   variant='outlined'
                   color='primary'
                 />
@@ -683,14 +762,14 @@ export default function AssetsPage() {
                 placeholder='Filter by symbol, name, or tokenId…'
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                sx={{ mt: 2, minWidth: 320 }}
+                sx={{ mt: 2, width: '100%', maxWidth: 360 }}
                 InputProps={{
                   startAdornment: <SearchIcon fontSize='small' sx={{ mr: 1, color: 'text.secondary' }} />,
                 }}
               />
             </Box>
-            <Stack spacing={1} alignItems='flex-end'>
-              <Stack direction='row' spacing={1}>
+            <Stack spacing={1} alignItems={{ xs: 'stretch', md: 'flex-end' }} sx={{ flexShrink: 0 }}>
+              <Stack direction='row' spacing={1} justifyContent='flex-end' flexWrap='wrap' useFlexGap>
                 <Button
                   size='small'
                   variant='text'
@@ -704,18 +783,50 @@ export default function AssetsPage() {
                 </Button>
                 <Button
                   size='small'
-                  variant='outlined'
-                  startIcon={(loading || scanning) ? <CircularProgress size={14} /> : <RefreshIcon />}
+                  variant='contained'
+                  startIcon={(loading || scanning) ? <CircularProgress size={14} color='inherit' /> : <RefreshIcon />}
                   onClick={handleScan}
                   disabled={loading || scanning}
                 >
-                  {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Scan for STAS'}
+                  {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Refresh'}
                 </Button>
               </Stack>
-              {scanSummary && (
-                <Typography variant='caption' color='text.secondary' sx={{ maxWidth: 240, textAlign: 'right' }}>
-                  {scanSummary}
-                </Typography>
+              {scanStats && (scanStats.rows.length > 0 || scanStats.failed) && (
+                <Stack spacing={0.75} alignItems={{ xs: 'flex-start', md: 'flex-end' }} sx={{ maxWidth: 320 }}>
+                  {scanStats.rows.map((r) => (
+                    <Stack
+                      key={r.label}
+                      direction='row'
+                      spacing={0.5}
+                      alignItems='center'
+                      flexWrap='wrap'
+                      useFlexGap
+                      justifyContent={{ xs: 'flex-start', md: 'flex-end' }}
+                    >
+                      <Typography variant='caption' color='text.secondary' sx={{ fontWeight: 600, mr: 0.5 }}>
+                        {r.label}
+                      </Typography>
+                      <Chip size='small' variant='outlined' label={`${r.found} found`} />
+                      {r.registered > 0 && (
+                        <Chip size='small' color='success' variant='outlined' label={`${r.registered} new`} />
+                      )}
+                      {r.known > 0 && <Chip size='small' variant='outlined' label={`${r.known} known`} />}
+                      {r.errors > 0 && (
+                        <Chip
+                          size='small'
+                          color='error'
+                          variant='outlined'
+                          label={`${r.errors} ${r.errors === 1 ? 'error' : 'errors'}`}
+                        />
+                      )}
+                    </Stack>
+                  ))}
+                  {scanStats.failed && (
+                    <Typography variant='caption' color='error' sx={{ textAlign: { xs: 'left', md: 'right' } }}>
+                      {scanStats.failed}
+                    </Typography>
+                  )}
+                </Stack>
               )}
             </Stack>
           </Stack>
@@ -731,20 +842,27 @@ export default function AssetsPage() {
       <Card sx={{ mb: 2 }}>
         <CardContent>
           <Stack
-            direction='row'
+            direction={{ xs: 'column', sm: 'row' }}
             justifyContent='space-between'
-            alignItems='center'
+            alignItems={{ xs: 'stretch', sm: 'center' }}
             spacing={2}
           >
-            <Box>
+            <Box sx={{ minWidth: 0 }}>
               <Typography variant='h6' sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <AddCircleOutlineIcon fontSize='small' /> Receive {protocolLabel(receiveProtocol)}
+                <AddCircleOutlineIcon fontSize='small' /> Receive {receiveProtocol === 'stas' ? 'STAS / DSTAS' : protocolLabel(receiveProtocol)}
               </Typography>
               <Typography variant='caption' color='text.secondary'>
-                Generates the next BRC-42 derived receive address. Share with a sender.
+                Generates the next BRC-42 receive address for this standard. Share it with a sender.
               </Typography>
             </Box>
-            <Stack direction='row' spacing={1} alignItems='center'>
+            <Stack
+              direction='row'
+              spacing={1}
+              alignItems='center'
+              flexWrap='wrap'
+              useFlexGap
+              justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}
+            >
               {(['stas', 'bsv-21'] as TokenProtocolId[]).map((p) => (
                 <Button
                   key={p}
@@ -754,15 +872,17 @@ export default function AssetsPage() {
                   onClick={() => setReceiveProtocol(p)}
                   disabled={generatingReceive}
                 >
-                  {protocolLabel(p)}
+                  {p === 'stas' ? 'STAS / DSTAS' : protocolLabel(p)}
                 </Button>
               ))}
               <Button
+                size='small'
                 variant='contained'
+                startIcon={<AddCircleOutlineIcon fontSize='small' />}
                 onClick={handleGenerateReceive}
                 disabled={generatingReceive}
               >
-                {generatingReceive ? 'Generating…' : 'Generate new address'}
+                {generatingReceive ? 'Generating…' : 'New address'}
               </Button>
             </Stack>
           </Stack>
@@ -822,8 +942,8 @@ export default function AssetsPage() {
         <Card>
           <CardContent>
             <Typography variant='body2' color='text.secondary' textAlign='center'>
-              No STAS holdings yet. Click "Generate new address" above and send STAS to it,
-              or use the dev panel's <em>Register STAS by txid</em> to register one manually.
+              No token holdings yet. Generate a receive address above and have a sender
+              transfer STAS, DSTAS, or BSV-21 to it — then press <strong>Refresh</strong>.
             </Typography>
           </CardContent>
         </Card>
@@ -916,98 +1036,106 @@ export default function AssetsPage() {
             <Collapse in={isExpanded} unmountOnExit>
               <Divider />
               <Box sx={{ p: 1 }}>
-                {g.outputs.map((o) => (
-                  <Stack
-                    key={o.outpoint}
-                    direction='row'
-                    alignItems='center'
-                    spacing={2}
-                    sx={{
-                      p: 1.5,
-                      borderRadius: 1,
-                      '&:hover': { bgcolor: 'action.hover' },
-                    }}
-                  >
-                    <Box sx={{ flex: 1 }}>
-                      <Stack direction='row' spacing={1} alignItems='center'>
+                {g.outputs.map((o) => {
+                  const own = ownershipLabel(o.brc42KeyId)
+                  const adapter = stas?.tokens?.getById(o.protocol)
+                  const transferSupported = adapter?.transferSupported ?? false
+                  const sendDisabled =
+                    !o.spendable ||
+                    o.frozen ||
+                    o.confiscated ||
+                    !o.scriptHex ||
+                    !o.brc42KeyId ||
+                    !transferSupported
+                  const sendTip = !transferSupported
+                    ? `Send is not yet available for ${protocolLabel(o.protocol)} in this wallet.`
+                    : !o.spendable
+                      ? 'This output is not spendable yet.'
+                      : ''
+                  const sendBtn = (
+                    <Button
+                      size='small'
+                      variant='outlined'
+                      startIcon={<SendIcon fontSize='small' />}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openSend(o)
+                      }}
+                      disabled={sendDisabled}
+                    >
+                      Send
+                    </Button>
+                  )
+                  return (
+                    <Stack
+                      key={o.outpoint}
+                      direction='row'
+                      alignItems='center'
+                      spacing={1.5}
+                      sx={{ p: 1.5, borderRadius: 1, '&:hover': { bgcolor: 'action.hover' } }}
+                    >
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Stack direction='row' spacing={1} alignItems='center' flexWrap='wrap' useFlexGap>
+                          <Typography variant='body2' sx={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                            {o.protocol === 'bsv-21'
+                              ? `${formatTokenAmount(o.tokenAmount, o.decimals)} ${o.symbol ?? ''}`
+                              : `${o.satoshis.toLocaleString()} sats`}
+                          </Typography>
+                          {own && (
+                            <Tooltip title={own.full}>
+                              <Chip
+                                size='small'
+                                label={own.short}
+                                variant='outlined'
+                                color={own.peer ? 'info' : 'default'}
+                              />
+                            </Tooltip>
+                          )}
+                          {!o.spendable && (
+                            <Chip size='small' label='not spendable' color='warning' variant='outlined' />
+                          )}
+                          {o.frozen && <Chip size='small' label='frozen' color='error' />}
+                          {o.confiscated && <Chip size='small' label='confiscated' color='error' />}
+                        </Stack>
                         <Typography
-                          variant='body2'
-                          sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                          variant='caption'
+                          color='text.secondary'
+                          sx={{ fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.25 }}
                         >
-                          {o.protocol === 'bsv-21'
-                            ? `${formatTokenAmount(o.tokenAmount, o.decimals)} ${o.symbol ?? ''}`
-                            : `${o.satoshis.toLocaleString()} sats`}
+                          <Box component='span' sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {o.txid.substring(0, 16)}…:{o.vout}
+                          </Box>
+                          <a
+                            href={`https://whatsonchain.com/tx/${o.txid}`}
+                            target='_blank'
+                            rel='noreferrer'
+                            style={{ color: 'inherit', display: 'inline-flex' }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <OpenInNewIcon sx={{ fontSize: 12 }} />
+                          </a>
                         </Typography>
-                        {o.brc42KeyId && (
-                          <Chip size='small' label={o.brc42KeyId} variant='outlined' />
-                        )}
-                        {!o.spendable && (
-                          <Chip size='small' label='not spendable' color='warning' variant='outlined' />
-                        )}
-                        {o.frozen && <Chip size='small' label='frozen' color='error' />}
-                        {o.confiscated && <Chip size='small' label='confiscated' color='error' />}
-                      </Stack>
-                      <Typography
-                        variant='caption'
-                        color='text.secondary'
-                        sx={{ fontFamily: 'monospace', display: 'block' }}
-                      >
-                        {o.txid.substring(0, 16)}…:{o.vout}
-                        <a
-                          href={`https://whatsonchain.com/tx/${o.txid}`}
-                          target='_blank'
-                          rel='noreferrer'
-                          style={{
-                            color: 'inherit',
-                            marginLeft: 6,
-                            verticalAlign: 'middle',
-                            display: 'inline-flex',
-                          }}
-                          onClick={(e) => e.stopPropagation()}
+                        <Typography
+                          variant='caption'
+                          color='text.secondary'
+                          sx={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                         >
-                          <OpenInNewIcon sx={{ fontSize: 12 }} />
-                        </a>
-                      </Typography>
-                      <Typography variant='caption' color='text.secondary' display='block'>
-                        owner: {o.ownerAddress}
-                      </Typography>
-                    </Box>
-                    {(() => {
-                      const adapter = stas?.tokens?.getById(o.protocol)
-                      const transferSupported = adapter?.transferSupported ?? false
-                      const sendDisabled =
-                        !o.spendable ||
-                        o.frozen ||
-                        o.confiscated ||
-                        !o.scriptHex ||
-                        !o.brc42KeyId ||
-                        !transferSupported
-                      const tooltip = !transferSupported
-                        ? `Send is not yet available for ${protocolLabel(o.protocol)} in this wallet.`
-                        : ''
-                      const btn = (
-                        <Button
-                          size='small'
-                          variant='outlined'
-                          startIcon={<SendIcon fontSize='small' />}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            openSend(o)
-                          }}
-                          disabled={sendDisabled}
-                        >
-                          Send
-                        </Button>
-                      )
-                      return tooltip ? (
-                        <Tooltip title={tooltip}>
-                          {/* span so MUI can attach the tooltip to a disabled button */}
-                          <span>{btn}</span>
-                        </Tooltip>
-                      ) : btn
-                    })()}
-                  </Stack>
-                ))}
+                          owner: {o.ownerAddress}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ flexShrink: 0 }}>
+                        {sendTip ? (
+                          <Tooltip title={sendTip}>
+                            {/* span so MUI can attach the tooltip to a disabled button */}
+                            <span>{sendBtn}</span>
+                          </Tooltip>
+                        ) : (
+                          sendBtn
+                        )}
+                      </Box>
+                    </Stack>
+                  )
+                })}
               </Box>
             </Collapse>
           </Card>
@@ -1157,7 +1285,7 @@ export default function AssetsPage() {
                   color='text.secondary'
                   sx={{ fontFamily: 'monospace', display: 'block' }}
                 >
-                  from {sendTarget.brc42KeyId} ({sendTarget.ownerAddress.substring(0, 14)}…)
+                  from {ownershipLabel(sendTarget.brc42KeyId)?.short ?? '—'} ({sendTarget.ownerAddress.substring(0, 14)}…)
                 </Typography>
               </Box>
               <TextField
@@ -1169,27 +1297,41 @@ export default function AssetsPage() {
                 disabled={sending}
                 autoFocus
               />
-              {sendTarget.protocol === 'bsv-21' && (
-                <Box>
-                  <TextField
-                    label={`Amount (raw, max ${sendTarget.tokenAmount})`}
-                    value={sendBsv21Amount}
-                    onChange={(e) => setSendBsv21Amount(e.target.value)}
-                    fullWidth
-                    placeholder={sendTarget.tokenAmount}
-                    disabled={sending}
-                    helperText={
-                      sendBsv21Amount && /^\d+$/.test(sendBsv21Amount)
-                        ? `≈ ${formatTokenAmount(sendBsv21Amount, sendTarget.decimals)} ${sendTarget.symbol ?? ''}${
-                            BigInt(sendBsv21Amount) < BigInt(sendTarget.tokenAmount)
-                              ? ` · change ${formatTokenAmount((BigInt(sendTarget.tokenAmount) - BigInt(sendBsv21Amount)).toString(), sendTarget.decimals)} ${sendTarget.symbol ?? ''}`
-                              : ''
-                          }`
-                        : 'Raw token units (integer). Leave blank to send the whole UTXO.'
+              {(() => {
+                // Amount + split preview — for all three standards. STAS/DSTAS
+                // are satoshi-denominated; BSV-21 uses raw token units.
+                const isB21 = sendTarget.protocol === 'bsv-21'
+                const maxStr = isB21 ? sendTarget.tokenAmount : String(sendTarget.satoshis)
+                let helper: string = isB21
+                  ? 'Raw token units (integer). Leave blank to send the whole UTXO.'
+                  : 'Token satoshis (integer). Leave blank to send the whole UTXO.'
+                if (sendAmount && /^\d+$/.test(sendAmount)) {
+                  try {
+                    const amt = BigInt(sendAmount)
+                    const max = BigInt(maxStr)
+                    const change = max > amt ? max - amt : 0n
+                    if (isB21) {
+                      helper = `≈ ${formatTokenAmount(sendAmount, sendTarget.decimals)} ${sendTarget.symbol ?? ''}` +
+                        (change > 0n ? ` · change ${formatTokenAmount(change.toString(), sendTarget.decimals)} ${sendTarget.symbol ?? ''} stays in your wallet` : '')
+                    } else {
+                      helper = change > 0n
+                        ? `${amt.toLocaleString()} sats sent · ${change.toLocaleString()} sats change stays in your wallet`
+                        : `${amt.toLocaleString()} sats — whole UTXO`
                     }
+                  } catch { /* keep default helper */ }
+                }
+                return (
+                  <TextField
+                    label={`Amount (${isB21 ? 'raw' : 'sats'}, max ${maxStr})`}
+                    value={sendAmount}
+                    onChange={(e) => setSendAmount(e.target.value)}
+                    fullWidth
+                    placeholder={maxStr}
+                    disabled={sending}
+                    helperText={helper}
                   />
-                </Box>
-              )}
+                )
+              })()}
               <Typography variant='caption' color='text.secondary'>
                 The wallet covers BSV fee automatically. After broadcast, the recipient
                 wallet picks up the UTXO via the indexer-driven scan on its next Refresh

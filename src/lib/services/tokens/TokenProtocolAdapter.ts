@@ -60,6 +60,20 @@ export interface TransferArgs {
     brc42KeyId: string;
   };
   recipientAddress: string;
+  /**
+   * Token amount to send (satoshi-denominated for STAS/DSTAS). Omit to send the
+   * whole UTXO. When less than `source.satoshis` the transfer SPLITS: the
+   * recipient gets `amount` and the remainder returns to the sender as
+   * token-change at `senderChangeHash160`. BSV-21 carries its amount via
+   * `Bsv21SendExtras` instead (raw bigint string), so it ignores this field.
+   */
+  amount?: number;
+  /** Owner pkh (hex) for the sender's token-change output on a partial send. */
+  senderChangeHash160?: string;
+  /** BRC-42 keyId of the sender's change receive key (for createAction tracking). */
+  senderChangeKeyId?: string;
+  /** Canonical tokenId for the change output's metadata. */
+  tokenId?: string;
 }
 
 export interface TransferResult {
