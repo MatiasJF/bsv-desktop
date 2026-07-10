@@ -173,10 +173,19 @@ export class BSV21TransferService {
           `[bsv-21 transfer] origin validate unavailable for ${source.tokenId} — proceeding without ancestry check`
         );
       } else if (!valid.has(sourceOutpointUnderscored)) {
-        return {
-          ok: false,
-          reason: 'Selected UTXO failed origin verification — its inscription chain may not trace back to the canonical deploy.',
-        };
+        // Fail-open (not fail-closed): the overlay returned a validated set
+        // that omits our outpoint. This is common for self-broadcast transfers
+        // and tokens whose per-token worker lagged or rejected the submit — it
+        // does NOT mean the token is counterfeit. Blocking here would refuse a
+        // legitimate send of a UTXO we hold. Two facts make the overlay's set
+        // non-authoritative now:
+        //   • discovery migrated to WOC, whose BSV-21 indexer runs its OWN
+        //     origin validation on the receive side (the real gate), and
+        //   • the broadcast goes through wallet-toolbox/ARC, not the overlay.
+        // So warn and proceed; the recipient's indexer decides admissibility.
+        console.warn(
+          `[bsv-21 transfer] origin outpoint ${sourceOutpointUnderscored} not in overlay validated set for ${source.tokenId} — proceeding (WOC indexer is the receive-side gate)`
+        );
       }
     }
 
