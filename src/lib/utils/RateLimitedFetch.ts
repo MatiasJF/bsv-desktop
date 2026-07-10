@@ -1,15 +1,22 @@
 /**
  * Rate-limited fetch queue with 429 retry/backoff.
  *
- * Caps outbound rate (default: 2 req/s) AND auto-retries on 429 with
- * exponential backoff. Without retry, the STAS gap-limit scan (100+ addresses
- * to Bitails / WoC) loses any candidate that happens to be 429'd — the
- * IndexerClient catches errors and silently treats them as []. So a real
- * STAS UTXO at one of those addresses can be missed entirely and the scan
- * reports Candidates 0 even when the indexer has it.
+ * Caps outbound rate AND auto-retries on 429 with capped exponential backoff
+ * plus jitter. Two failure modes this guards against:
+ *  1. Discovery scans — a candidate address that's 429'd is silently treated
+ *     as [] by the indexer client, so a real UTXO there is missed entirely.
+ *  2. Registration — findCreateContractTxid (ancestry walk) and
+ *     buildChainedAtomicBeef (proof chain) fetch rawTx/merkle proofs here as a
+ *     fallback when wallet-toolbox's own (UNTHROTTLED) `services.getRawTx/
+ *     getMerklePath` 429s. Those unthrottled primary calls are what push total
+ *     WoC traffic over the limit, so the throttled fallback must be persistent
+ *     enough to win — otherwise a freshly-discovered token fails to register
+ *     and needs a manual register-by-txid.
  *
- * Honours `Retry-After` when the server sends it; otherwise backs off
- * 1.5s, 3s, 6s across three attempts before surfacing the 429 to the caller.
+ * Honours `Retry-After` when present; otherwise backs off 1s, 2s, 4s, 8s, 8s, 8s
+ * (capped) with ±25% jitter across up to `maxRetries` attempts before surfacing
+ * the 429. The rate is deliberately below WoC's ceiling to leave headroom for
+ * wallet-toolbox's concurrent (unthrottled) traffic.
  */
 class RateLimitedFetch {
   private queue: Array<{
@@ -23,7 +30,7 @@ class RateLimitedFetch {
   private minInterval: number
   private maxRetries: number
 
-  constructor(requestsPerSecond: number = 2, maxRetries: number = 3) {
+  constructor(requestsPerSecond: number = 1.5, maxRetries: number = 6) {
     this.requestsPerSecond = requestsPerSecond
     this.minInterval = 1000 / requestsPerSecond
     this.maxRetries = maxRetries
@@ -44,9 +51,12 @@ class RateLimitedFetch {
       if (res.status !== 429) return res
       if (attempt === this.maxRetries) return res
       const retryAfter = parseInt(res.headers.get('Retry-After') ?? '', 10)
-      const backoff = Number.isFinite(retryAfter) && retryAfter > 0
+      // Capped exponential (1s,2s,4s,8s,8s,…) + ±25% jitter so concurrent
+      // retries don't thunder back in lockstep. Retry-After wins when present.
+      const base = Number.isFinite(retryAfter) && retryAfter > 0
         ? retryAfter * 1000
-        : 1500 * Math.pow(2, attempt)
+        : Math.min(8000, 1000 * Math.pow(2, attempt))
+      const backoff = base + Math.floor(base * 0.25 * Math.random())
       await new Promise((r) => setTimeout(r, backoff))
     }
     return fetch(url, options)
@@ -78,7 +88,8 @@ class RateLimitedFetch {
   }
 }
 
-// Singleton instance for WhatsOnChain / Bitails API calls. 2 req/s leaves
-// headroom for wallet-toolbox's own concurrent WoC traffic; 429s auto-retry
-// with backoff.
-export const wocFetch = new RateLimitedFetch(2)
+// Singleton for WhatsOnChain / Bitails API calls. 1.5 req/s leaves headroom
+// for wallet-toolbox's own concurrent (unthrottled) WoC traffic, and 429s
+// auto-retry with capped backoff across up to 6 attempts so registration
+// fetches win under sustained pressure instead of failing to null.
+export const wocFetch = new RateLimitedFetch(1.5, 6)
