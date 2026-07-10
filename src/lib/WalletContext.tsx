@@ -457,6 +457,9 @@ export const WalletContextProvider: React.FC<WalletContextProps> = ({
         identityKey: stas.keyDeriver.identityKey,
         chain: stas.keyDeriver.chain,
         originator: ADMIN_ORIGINATOR,
+        // TokenProtocolRegistry — powers the /dstas/transfer + /bsv-21/transfer
+        // legacy address-send routes (same adapters the Assets page Send uses).
+        tokens: stas.tokens,
       })
     } else {
       setPeerTokensForHttpRoute(null)

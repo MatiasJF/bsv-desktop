@@ -198,6 +198,13 @@ let _currentPeerTokensBundle: {
   identityKey: string;
   chain: 'main' | 'test';
   originator?: string;
+  /**
+   * TokenProtocolRegistry — the SAME adapters the Assets page uses for
+   * legacy address sends (`tokens.getById(protocol).transfer(...)`). Hung
+   * off this bundle so the `/dstas/transfer` + `/bsv-21/transfer` routes can
+   * drive an on-chain, no-MessageBox transfer without touching PeerTokenClient.
+   */
+  tokens?: any;
 } | null = null;
 let _listenerRegistered = false;
 
@@ -278,6 +285,7 @@ export function setPeerTokensForHttpRoute(
     identityKey: string;
     chain: 'main' | 'test';
     originator?: string;
+    tokens?: any;
   } | null
 ): void {
   _currentPeerTokensBundle = bundle;
@@ -1644,6 +1652,86 @@ export const onWalletReady = async (
             }
           } catch (e) {
             response = { request_id: req.request_id, status: 500, body: JSON.stringify({ error: e instanceof Error ? e.message : String(e) }) };
+          }
+          break;
+        }
+
+        // Legacy address sends for DSTAS + BSV-21 — the terminal analog of the
+        // Assets page's Send button. Sends a token on-chain to a plain address
+        // WITHOUT MessageBox (receiver discovers it via WOC), using the SAME
+        // TokenProtocolRegistry adapters the Assets page uses
+        // (`tokens.getById(protocol).transfer(...)`). PeerTokenClient is not
+        // involved. STAS keeps its own `/stas/transfer` (with permission modal).
+        //   POST /dstas/transfer  { outpoint, recipientAddress }            (whole UTXO)
+        //   POST /bsv-21/transfer { outpoint, recipientAddress, amount? }   (amount = raw units, default whole)
+        case '/dstas/transfer':
+        case '/bsv-21/transfer': {
+          if (!_currentPeerTokensBundle?.tokens) {
+            response = { request_id: req.request_id, status: 503, body: JSON.stringify({ error: 'Token services not ready' }) };
+            break;
+          }
+          const wantProtocol = req.path === '/dstas/transfer' ? 'dstas' : 'bsv-21';
+          try {
+            const { wallet: w, identityKey, chain, originator, tokens } = _currentPeerTokensBundle;
+            const { outpoint, recipientAddress, amount } = (req.body ? JSON.parse(req.body) : {}) as {
+              outpoint?: string; recipientAddress?: string; amount?: string | number;
+            };
+            if (!outpoint || !recipientAddress) {
+              response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: 'outpoint and recipientAddress are required' }) };
+              break;
+            }
+            // Resolve the holding's full source from just the outpoint — the
+            // same uniform resolver the Assets page + /peerToken routes use.
+            const holdings = await loadPeerHoldings({ wallet: w, identityKey, chain, originator });
+            const holding = holdings.find((h) => h.key === outpoint);
+            if (!holding) {
+              response = { request_id: req.request_id, status: 404, body: JSON.stringify({ error: `holding ${outpoint} not found (already spent or wrong wallet)` }) };
+              break;
+            }
+            if (holding.protocol !== wantProtocol) {
+              response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: `outpoint is ${holding.protocol}, not ${wantProtocol}` }) };
+              break;
+            }
+            const adapter = tokens.getById(holding.protocol);
+            if (!adapter?.transferSupported || !adapter.transfer) {
+              response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: `send not supported for ${holding.protocol}` }) };
+              break;
+            }
+            const s: any = holding.source;
+            const baseArgs: any = {
+              source: {
+                txid: s.txid,
+                vout: s.outputIndex,
+                scriptHex: s.lockingScriptHex,
+                satoshis: s.satoshis,
+                brc42KeyId: s.brc42KeyId ?? 'recv 0',
+              },
+              recipientAddress: String(recipientAddress).trim(),
+            };
+            let args: any = baseArgs;
+            if (holding.protocol === 'bsv-21') {
+              // BSV-21 is divisible: amount is a raw bigint string; default to
+              // the whole balance. The service builds a token-change output
+              // when amount < balance. (DSTAS goes whole-UTXO via the registry
+              // adapter, matching the Assets page.)
+              const sendAmt = amount != null ? String(amount) : String(s.amt ?? '0');
+              if (!/^\d+$/.test(sendAmt) || BigInt(sendAmt) <= 0n) {
+                response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: `amount must be a positive integer (raw token units); got ${sendAmt}` }) };
+                break;
+              }
+              if (BigInt(sendAmt) > BigInt(s.amt ?? '0')) {
+                response = { request_id: req.request_id, status: 400, body: JSON.stringify({ error: `amount ${sendAmt} exceeds balance ${s.amt}` }) };
+                break;
+              }
+              args = { ...baseArgs, tokenId: s.tokenId ?? s.assetId, sourceAmt: String(s.amt), amount: sendAmt, dec: s.dec, sym: s.sym, icon: s.icon };
+            }
+            // No permission modal here (unlike /stas/transfer): these are
+            // Origin-gated routes, parity with /peerToken/send, which also
+            // avoids the 30s HTTP-bridge timeout racing a human click.
+            const result = await adapter.transfer(args);
+            response = { request_id: req.request_id, status: 200, body: JSON.stringify(result) };
+          } catch (e) {
+            response = { request_id: req.request_id, status: 500, body: JSON.stringify({ ok: false, reason: e instanceof Error ? e.message : String(e) }) };
           }
           break;
         }
