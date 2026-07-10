@@ -19,8 +19,16 @@ export const BSV21_COUNTERPARTY = 'self';
 /** keyID for the Nth receive key — monotonic counter, 1-based. */
 export const bsv21KeyId = (index: number): string => `recv ${index}`;
 
-/** Default gap limit for ownership scans beyond the high-water mark. */
-export const BSV21_GAP_LIMIT = 100;
+/**
+ * Default gap limit for ownership scans beyond the high-water mark.
+ *
+ * BIP-44's standard gap of 20 — matches STAS_GAP_LIMIT. With WOC discovery each
+ * gap address is a rate-limited `/token/bsv21/{addr}/unspent` call, so the old
+ * value of 100 meant `hwm + 100` requests per scan, which tripped WOC's 429
+ * throttle (and a 429'd address degrades to "empty", risking missed tokens).
+ * Received tokens land at issued addresses (≤ hwm); 20 beyond hwm is ample.
+ */
+export const BSV21_GAP_LIMIT = 20;
 
 /** ord-inscription content type for BSV-20 / BSV-21 JSON payloads. */
 export const BSV20_CONTENT_TYPE = 'application/bsv-20';
