@@ -88,6 +88,33 @@ describe('BSV-21 — getOwnedTxos', () => {
     ])
   })
 
+  // Captured live from WOC mainnet (EXB21C, our test fleet). WOC's *decoded*
+  // bsv20 object spells the ticker `symbol`; only the raw inscription JSON uses
+  // `sym`. Reading `bsv20.sym` alone silently yielded an undefined ticker.
+  test('maps WOC mainnet shape: bsv20.symbol (not sym), amt as number, dec from insc', async () => {
+    fetchMock.mockResolvedValueOnce(
+      ok({
+        tokens: [
+          {
+            outpoint: 'c0f0ba_0',
+            vout: 0,
+            funderAddress: '13NpehPMQXHqrUQeVbv29tbiBsXGjMBESx',
+            data: {
+              bsv20: { amt: 10000, id: 'c0f0ba_0', op: 'deploy+mint', protocol: 'bsv-20', symbol: 'EXB21C' },
+              insc: { json: { amt: '10000', dec: '0', op: 'deploy+mint', p: 'bsv-20', sym: 'EXB21C' } },
+            },
+            current: { txid: 'c0f0ba', blockHeight: 957666 },
+          },
+        ],
+        total_count: 1,
+      })
+    )
+    const res = await client().getOwnedTxos('13NpehPMQXHqrUQeVbv29tbiBsXGjMBESx')
+    expect(res).toEqual([
+      { outpoint: 'c0f0ba_0', id: 'c0f0ba_0', amt: '10000', dec: 0, sym: 'EXB21C', icon: undefined, events: ['bsv21'] },
+    ])
+  })
+
   test('network error → [] (fail-soft)', async () => {
     fetchMock.mockRejectedValueOnce(new Error('offline'))
     const res = await client().getOwnedTxos('1Addr')

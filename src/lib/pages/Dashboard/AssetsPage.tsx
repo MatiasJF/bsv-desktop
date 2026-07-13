@@ -295,7 +295,14 @@ export default function AssetsPage() {
   const [scanning, setScanning] = useState(false)
   const [scanStats, setScanStats] = useState<
     | {
-        rows: { label: string; found: number; registered: number; known: number; errors: number }[]
+        rows: {
+          label: string
+          found: number
+          registered: number
+          known: number
+          errors: number
+          errorMessages: string[]
+        }[]
         failed?: string
       }
     | null
@@ -441,26 +448,37 @@ export default function AssetsPage() {
     try {
       // Run STAS / DSTAS first (one merged WOC scan), then BSV-21. Sequential
       // so error attribution stays clear in the summary chips below.
+      // A scan error carries the reason that made a candidate unusable. Keep it
+      // — a bare count tells a tester nothing about what to report back.
+      const describe = (errs?: { outpoint?: string; message: string }[]): string[] =>
+        (errs ?? []).map((e) => (e.outpoint ? `${e.outpoint}: ${e.message}` : e.message))
+
       const stasRes = await stas.discovery.scan()
+      const stasErrors = describe(stasRes.errors)
+      if (stasErrors.length > 0) console.warn('[scan] STAS/DSTAS errors:', stasErrors)
       const rows = [
         {
           label: 'STAS / DSTAS',
           found: stasRes.candidates ?? 0,
           registered: stasRes.registered ?? 0,
           known: stasRes.skippedAlreadyKnown ?? 0,
-          errors: stasRes.errors?.length ?? 0,
+          errors: stasErrors.length,
+          errorMessages: stasErrors,
         },
       ]
       let failed: string | undefined
       if (stas.bsv21Discovery) {
         try {
           const bsv21Res = await stas.bsv21Discovery.scan()
+          const bsv21Errors = describe(bsv21Res.errors)
+          if (bsv21Errors.length > 0) console.warn('[scan] BSV-21 errors:', bsv21Errors)
           rows.push({
             label: 'BSV-21',
             found: bsv21Res.candidates ?? 0,
             registered: bsv21Res.registered ?? 0,
             known: bsv21Res.skippedAlreadyKnown ?? 0,
-            errors: bsv21Res.errors?.length ?? 0,
+            errors: bsv21Errors.length,
+            errorMessages: bsv21Errors,
           })
         } catch (e) {
           failed = `BSV-21 scan failed: ${e instanceof Error ? e.message : String(e)}`
@@ -796,29 +814,50 @@ export default function AssetsPage() {
                   {scanStats.rows.map((r) => (
                     <Stack
                       key={r.label}
-                      direction='row'
-                      spacing={0.5}
-                      alignItems='center'
-                      flexWrap='wrap'
-                      useFlexGap
-                      justifyContent={{ xs: 'flex-start', md: 'flex-end' }}
+                      spacing={0.25}
+                      alignItems={{ xs: 'flex-start', md: 'flex-end' }}
+                      sx={{ width: '100%' }}
                     >
-                      <Typography variant='caption' color='text.secondary' sx={{ fontWeight: 600, mr: 0.5 }}>
-                        {r.label}
-                      </Typography>
-                      <Chip size='small' variant='outlined' label={`${r.found} found`} />
-                      {r.registered > 0 && (
-                        <Chip size='small' color='success' variant='outlined' label={`${r.registered} new`} />
-                      )}
-                      {r.known > 0 && <Chip size='small' variant='outlined' label={`${r.known} known`} />}
-                      {r.errors > 0 && (
-                        <Chip
-                          size='small'
+                      <Stack
+                        direction='row'
+                        spacing={0.5}
+                        alignItems='center'
+                        flexWrap='wrap'
+                        useFlexGap
+                        justifyContent={{ xs: 'flex-start', md: 'flex-end' }}
+                      >
+                        <Typography variant='caption' color='text.secondary' sx={{ fontWeight: 600, mr: 0.5 }}>
+                          {r.label}
+                        </Typography>
+                        <Chip size='small' variant='outlined' label={`${r.found} found`} />
+                        {r.registered > 0 && (
+                          <Chip size='small' color='success' variant='outlined' label={`${r.registered} new`} />
+                        )}
+                        {r.known > 0 && <Chip size='small' variant='outlined' label={`${r.known} known`} />}
+                        {r.errors > 0 && (
+                          <Chip
+                            size='small'
+                            color='error'
+                            variant='outlined'
+                            label={`${r.errors} ${r.errors === 1 ? 'error' : 'errors'}`}
+                          />
+                        )}
+                      </Stack>
+                      {r.errorMessages.map((m) => (
+                        <Typography
+                          key={m}
+                          variant='caption'
                           color='error'
-                          variant='outlined'
-                          label={`${r.errors} ${r.errors === 1 ? 'error' : 'errors'}`}
-                        />
-                      )}
+                          sx={{
+                            textAlign: { xs: 'left', md: 'right' },
+                            wordBreak: 'break-word',
+                            fontFamily: 'monospace',
+                            fontSize: '0.68rem',
+                          }}
+                        >
+                          {m}
+                        </Typography>
+                      ))}
                     </Stack>
                   ))}
                   {scanStats.failed && (

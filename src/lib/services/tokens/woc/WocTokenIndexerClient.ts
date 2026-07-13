@@ -143,14 +143,18 @@ export class WocTokenIndexerClient {
     if (!Array.isArray(res?.tokens)) return [];
     return res!.tokens!.map((t) => {
       const bsv20 = t.data?.bsv20 ?? {};
-      const decStr = t.data?.insc?.json?.dec;
+      const insc = t.data?.insc?.json ?? {};
+      const decStr = insc.dec;
       const dec = decStr !== undefined && decStr !== '' ? Number(decStr) : undefined;
       return {
-        outpoint: t.outpoint ?? '',
-        id: (bsv20.id ?? t.outpoint) as string | undefined,
-        amt: bsv20.amt !== undefined ? String(bsv20.amt) : undefined,
+        outpoint: t.outpoint ?? (t.vout !== undefined && t.current?.txid ? `${t.current.txid}_${t.vout}` : ''),
+        id: (bsv20.id ?? insc.id ?? t.outpoint) as string | undefined,
+        amt: bsv20.amt !== undefined ? String(bsv20.amt) : insc.amt,
         dec: Number.isFinite(dec as number) ? (dec as number) : undefined,
-        sym: bsv20.sym,
+        // WOC names it `symbol` on the decoded `bsv20` object but `sym` inside
+        // the raw inscription JSON. Transfers carry neither — the parsed
+        // locking script is the caller's fallback.
+        sym: bsv20.symbol ?? bsv20.sym ?? insc.sym,
         icon: bsv20.icon,
         events: ['bsv21'],
       } as IndexedOutput;
@@ -162,8 +166,16 @@ export class WocTokenIndexerClient {
 interface WocBsv21Unspent {
   outpoint?: string;
   vout?: number;
+  current?: { txid?: string };
   data?: {
-    bsv20?: { id?: string; amt?: string | number; sym?: string; icon?: string };
-    insc?: { json?: { dec?: string } };
+    bsv20?: {
+      id?: string;
+      amt?: string | number;
+      /** WOC's decoded field name. `sym` is the raw-inscription spelling. */
+      symbol?: string;
+      sym?: string;
+      icon?: string;
+    };
+    insc?: { json?: { id?: string; amt?: string; dec?: string; sym?: string } };
   };
 }
