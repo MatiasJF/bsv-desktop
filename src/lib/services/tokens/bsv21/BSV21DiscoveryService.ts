@@ -329,7 +329,7 @@ export class BSV21DiscoveryService {
     };
   }
 
-  async scan(): Promise<Bsv21ScanResult> {
+  async scan(opts: { onProgress?: (p: { phase: 'bsv21' | 'register'; done: number; total: number }) => void } = {}): Promise<Bsv21ScanResult> {
     const result: Bsv21ScanResult = {
       scannedAddresses: 0,
       candidates: 0,
@@ -367,7 +367,9 @@ export class BSV21DiscoveryService {
     //    every UTXO the overlay knows about for that address regardless
     //    of token — we filter to BSV-21 entries below.
     const candidates: Array<{ address: string; out: IndexedOutput }> = [];
-    for (const address of addressToHash.keys()) {
+    const addressList = [...addressToHash.keys()];
+    for (const [i, address] of addressList.entries()) {
+      opts.onProgress?.({ phase: 'bsv21', done: i, total: addressList.length });
       try {
         const txos = await this.deps.indexer.getOwnedTxos(address);
         for (const o of txos) {

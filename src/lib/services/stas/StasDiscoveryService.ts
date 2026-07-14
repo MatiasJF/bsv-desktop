@@ -19,7 +19,7 @@ import { STAS_GAP_LIMIT } from './constants';
 import type { ParsedDstas } from './dstasParser';
 import type { StasKeyDeriver } from './StasKeyDeriver';
 import type { StasRegistration } from './StasRegistration';
-import type { WocUtxo } from '../tokens/woc/WocTokenIndexerClient';
+import type { ScanProgressFn, WocUtxo } from '../tokens/woc/WocTokenIndexerClient';
 import { stasQuery } from './stasIpc';
 import { TOKEN_BASKETS } from '../../constants/baskets';
 import type { TokenProtocolRegistry, ParsedTokenOutput } from '../tokens';
@@ -80,11 +80,24 @@ export interface ScanResult {
  */
 export interface StasDiscoveryIndexer {
   getUtxosForAddresses(
-    addresses: string[]
+    addresses: string[],
+    opts?: { onProgress?: ScanProgressFn }
   ): Promise<Array<{ address: string; utxos: WocUtxo[] }>>;
   getDstasUtxosForOwners(
-    ownerHash160s: string[]
+    ownerHash160s: string[],
+    opts?: { onProgress?: ScanProgressFn }
   ): Promise<Array<{ ownerHash160: string; utxos: WocUtxo[] }>>;
+}
+
+/** What a scan is doing right now, for a caller that wants to show progress. */
+export interface ScanProgress {
+  phase: 'stas' | 'dstas' | 'register';
+  done: number;
+  total: number;
+}
+
+export interface ScanOptions {
+  onProgress?: (p: ScanProgress) => void;
 }
 
 export interface StasDiscoveryDeps {
@@ -213,7 +226,7 @@ export class StasDiscoveryService {
     return out;
   }
 
-  async scan(): Promise<ScanResult> {
+  async scan(opts: ScanOptions = {}): Promise<ScanResult> {
     const result: ScanResult = {
       scannedAddresses: 0,
       candidates: 0,
@@ -258,7 +271,9 @@ export class StasDiscoveryService {
     //    base58). Both are merged into one work-list of {owner, keyIndex,
     //    utxos} so the per-UTXO registration loop below is shared.
     const addresses = [...addressToHash.keys()];
-    const stasScanned = await this.deps.indexer.getUtxosForAddresses(addresses);
+    const stasScanned = await this.deps.indexer.getUtxosForAddresses(addresses, {
+      onProgress: (done, total) => opts.onProgress?.({ phase: 'stas', done, total }),
+    });
 
     type OwnerUtxos = {
       ownerHash160Hex: string | undefined;
@@ -275,7 +290,9 @@ export class StasDiscoveryService {
     });
 
     {
-      const dstasScanned = await this.deps.indexer.getDstasUtxosForOwners([...ownerMap.keys()]);
+      const dstasScanned = await this.deps.indexer.getDstasUtxosForOwners([...ownerMap.keys()], {
+        onProgress: (done, total) => opts.onProgress?.({ phase: 'dstas', done, total }),
+      });
       for (const { ownerHash160, utxos } of dstasScanned) {
         if (utxos.length === 0) continue;
         work.push({

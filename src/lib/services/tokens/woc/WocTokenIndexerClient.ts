@@ -32,6 +32,13 @@ import type { IndexedOutput } from '../bsv21/OneSatIndexerClient';
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv';
 
+/**
+ * Reports how far a per-address fan-out has got. WOC has no bulk token endpoint,
+ * so a scan is one throttled request per derived address — tens of seconds for a
+ * grown wallet. Without this the UI can only show an indeterminate spinner.
+ */
+export type ScanProgressFn = (done: number, total: number) => void;
+
 /** A token UTXO as returned by WOC's per-address token endpoints. */
 export interface WocUtxo {
   /** Transaction id (hex). */
@@ -112,10 +119,12 @@ export class WocTokenIndexerClient {
    * shared rate limiter (same budget the wallet's other WOC polling uses).
    */
   async getUtxosForAddresses(
-    addresses: string[]
+    addresses: string[],
+    opts: { onProgress?: ScanProgressFn } = {}
   ): Promise<Array<{ address: string; utxos: WocUtxo[] }>> {
     const out: Array<{ address: string; utxos: WocUtxo[] }> = [];
     for (const address of addresses) {
+      opts.onProgress?.(out.length, addresses.length);
       const res = await this.getJson<{ utxos?: WocTokenUtxo[] | null }>(
         `/address/${encodeURIComponent(address)}/tokens/unspent?script=true`
       );
@@ -131,10 +140,12 @@ export class WocTokenIndexerClient {
    * `WocUtxo` shape so the STAS discovery loop can consume it uniformly.
    */
   async getDstasUtxosForOwners(
-    ownerHash160s: string[]
+    ownerHash160s: string[],
+    opts: { onProgress?: ScanProgressFn } = {}
   ): Promise<Array<{ ownerHash160: string; utxos: WocUtxo[] }>> {
     const out: Array<{ ownerHash160: string; utxos: WocUtxo[] }> = [];
     for (const ownerHash160 of ownerHash160s) {
+      opts.onProgress?.(out.length, ownerHash160s.length);
       const res = await this.getJson<{ utxos?: WocTokenUtxo[] | null }>(
         `/address/${encodeURIComponent(ownerHash160)}/tokens/dstas/unspent?script=true`
       );

@@ -293,6 +293,9 @@ export default function AssetsPage() {
   const [activityExpanded, setActivityExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
+  // WOC has no bulk token endpoint, so a scan is one throttled request per
+  // derived address — tens of seconds on a grown wallet. Show where it is.
+  const [scanProgress, setScanProgress] = useState<string | null>(null)
   const [scanStats, setScanStats] = useState<
     | {
         rows: {
@@ -445,6 +448,15 @@ export default function AssetsPage() {
     }
     setScanning(true)
     setScanStats(null)
+    setScanProgress(null)
+    const PHASE_LABEL: Record<string, string> = {
+      stas: 'STAS',
+      dstas: 'DSTAS',
+      bsv21: 'BSV-21',
+      register: 'registering',
+    }
+    const onProgress = (p: { phase: string; done: number; total: number }) =>
+      setScanProgress(`${PHASE_LABEL[p.phase] ?? p.phase} ${p.done + 1}/${p.total}`)
     try {
       // Run STAS / DSTAS first (one merged WOC scan), then BSV-21. Sequential
       // so error attribution stays clear in the summary chips below.
@@ -453,7 +465,7 @@ export default function AssetsPage() {
       const describe = (errs?: { outpoint?: string; message: string }[]): string[] =>
         (errs ?? []).map((e) => (e.outpoint ? `${e.outpoint}: ${e.message}` : e.message))
 
-      const stasRes = await stas.discovery.scan()
+      const stasRes = await stas.discovery.scan({ onProgress })
       const stasErrors = describe(stasRes.errors)
       if (stasErrors.length > 0) console.warn('[scan] STAS/DSTAS errors:', stasErrors)
       const rows = [
@@ -469,7 +481,7 @@ export default function AssetsPage() {
       let failed: string | undefined
       if (stas.bsv21Discovery) {
         try {
-          const bsv21Res = await stas.bsv21Discovery.scan()
+          const bsv21Res = await stas.bsv21Discovery.scan({ onProgress })
           const bsv21Errors = describe(bsv21Res.errors)
           if (bsv21Errors.length > 0) console.warn('[scan] BSV-21 errors:', bsv21Errors)
           rows.push({
@@ -489,6 +501,7 @@ export default function AssetsPage() {
       setScanStats({ rows: [], failed: `Scan failed: ${e instanceof Error ? e.message : String(e)}` })
     } finally {
       setScanning(false)
+      setScanProgress(null)
     }
     await loadHoldings()
   }, [stas?.discovery, stas?.bsv21Discovery, loadHoldings])
@@ -806,7 +819,7 @@ export default function AssetsPage() {
                   onClick={handleScan}
                   disabled={loading || scanning}
                 >
-                  {scanning ? 'Scanning…' : loading ? 'Loading…' : 'Refresh'}
+                  {scanning ? (scanProgress ? `Scanning ${scanProgress}` : 'Scanning…') : loading ? 'Loading…' : 'Refresh'}
                 </Button>
               </Stack>
               {scanStats && (scanStats.rows.length > 0 || scanStats.failed) && (
