@@ -484,11 +484,6 @@ const Greeter: React.FC<any> = ({ history }) => {
   const [directKeyLocked, setDirectKeyLocked] = useState(false)
 
   const [showConfig, setShowConfig] = useState(false)
-  // Instant-create prototype: one tap auto-generates a self-custody key and
-  // lands the user in the wallet (unfunded, receive-only). pendingInstant drives
-  // the chained generate→submit once the wallet manager is ready.
-  const [pendingInstant, setPendingInstant] = useState(false)
-  const [instantStatus, setInstantStatus] = useState('')
 
   const phoneFieldRef = useRef(null)
   const codeFieldRef = useRef(null)
@@ -531,34 +526,10 @@ const Greeter: React.FC<any> = ({ history }) => {
     })
   }, [finalizeConfig])
 
-  // One-tap instant create: self-custody, mainnet, no WAB/remote-storage/messagebox.
-  // Auto-generates a key and authenticates without any user input. The user lands
-  // in the wallet immediately (unfunded, receive-only); backup + funding are
-  // just-in-time nudges, not upfront gates.
-  const handleInstantCreate = useCallback(() => {
-    setEntryMode('create')
-    setShowConfig(false)
-    setInstantStatus('Creating your wallet…')
-    setPendingInstant(true)
-    finalizeConfig({
-      wabUrl: '',
-      wabInfo: null,
-      method: '',
-      network: DEFAULT_CHAIN as 'main' | 'test',
-      storageUrl: '',
-      messageBoxUrl: '',
-      loginType: 'direct-key',
-      useWab: false,
-      useRemoteStorage: false,
-      useMessageBox: false,
-    })
-  }, [finalizeConfig])
-
   // Go back to the choose screen
   const handleBack = useCallback(() => {
     setEntryMode('choose')
     setShowConfig(false)
-    setPendingInstant(false)
   }, [])
 
   useEffect(() => {
@@ -809,32 +780,6 @@ const Greeter: React.FC<any> = ({ history }) => {
     }
   }, [walletManager, saveEnhancedSnapshot])
 
-  // Instant-create driver: once finalizeConfig has built the wallet manager,
-  // auto-generate a key and submit it — no user input. handleSubmitDirectKey
-  // redirects to the dashboard on success.
-  useEffect(() => {
-    if (!pendingInstant) return
-    if (!walletManager || walletManager.authenticated) return
-    let cancelled = false
-    void (async () => {
-      try {
-        setInstantStatus('Generating your keys…')
-        const mnemonicStr = await handleGenerateRandomMnemonic()
-        if (cancelled) return
-        if (!mnemonicStr) {
-          setPendingInstant(false)
-          setEntryMode('choose')
-          return
-        }
-        setInstantStatus('Almost there…')
-        await handleSubmitDirectKey(mnemonicStr)
-      } finally {
-        if (!cancelled) setPendingInstant(false)
-      }
-    })()
-    return () => { cancelled = true }
-  }, [pendingInstant, walletManager, handleGenerateRandomMnemonic, handleSubmitDirectKey])
-
   if (!pageLoaded) {
     return <PageLoading />
   }
@@ -1084,7 +1029,7 @@ const Greeter: React.FC<any> = ({ history }) => {
                 variant="contained"
                 size="large"
                 startIcon={<WalletIcon />}
-                onClick={handleInstantCreate}
+                onClick={handleCreateWallet}
                 sx={{ textTransform: 'none', py: 1, fontSize: '1rem' }}
               >
                 {t('create_wallet_button')}
@@ -1098,45 +1043,28 @@ const Greeter: React.FC<any> = ({ history }) => {
               >
                 {t('login_button')}
               </Button>
-              {/* Power users: manual key/mnemonic entry, network/storage config */}
-              <Button
-                variant="text"
-                size="small"
-                onClick={handleCreateWallet}
-                sx={{ textTransform: 'none', alignSelf: 'center', color: 'text.secondary' }}
-              >
-                Advanced setup
-              </Button>
             </Box>
           </>
         )}
 
         {/* ===== CREATE MODE: Direct-key flow with optional advanced config ===== */}
         {entryMode === 'create' && (
-          pendingInstant ? (
-            /* Instant create: no inputs — spinner until the wallet is ready */
-            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, py: 6 }}>
-              <CircularProgress />
-              <Typography variant="body1" color="text.secondary">{instantStatus}</Typography>
+          <>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+              <Button size="small" startIcon={<ArrowBackIcon />} onClick={handleBack} sx={{ textTransform: 'none' }}>
+                {t('back_button')}
+              </Button>
+              <Tooltip title={showConfig ? t('config_hide_tooltip') : t('config_show_tooltip')} placement="left">
+                <IconButton size="small" onClick={() => setShowConfig(s => !s)} color={showConfig ? 'secondary' : 'default'}>
+                  {showConfig ? <CloseIcon fontSize="small" /> : <SettingsIcon fontSize="small" />}
+                </IconButton>
+              </Tooltip>
             </Box>
-          ) : (
-            <>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-                <Button size="small" startIcon={<ArrowBackIcon />} onClick={handleBack} sx={{ textTransform: 'none' }}>
-                  {t('back_button')}
-                </Button>
-                <Tooltip title={showConfig ? t('config_hide_tooltip') : t('config_show_tooltip')} placement="left">
-                  <IconButton size="small" onClick={() => setShowConfig(s => !s)} color={showConfig ? 'secondary' : 'default'}>
-                    {showConfig ? <CloseIcon fontSize="small" /> : <SettingsIcon fontSize="small" />}
-                  </IconButton>
-                </Tooltip>
-              </Box>
-              {/* Advanced config for power users (network, storage, message box — no login type) */}
-              <WalletConfig hideLoginType open={showConfig} onToggle={() => setShowConfig(s => !s)} />
-              {/* Direct key stepper — shown once config is finalized */}
-              {!showConfig && configStatus === 'configured' && authStepper}
-            </>
-          )
+            {/* Advanced config for power users (network, storage, message box — no login type) */}
+            <WalletConfig hideLoginType open={showConfig} onToggle={() => setShowConfig(s => !s)} />
+            {/* Direct key stepper — shown once config is finalized */}
+            {!showConfig && configStatus === 'configured' && authStepper}
+          </>
         )}
 
         {/* ===== LOGIN MODE: Stepper shown immediately, config panel available but collapsed ===== */}

@@ -1634,8 +1634,7 @@ export default function AssetsPage() {
               })()}
               <Typography variant='caption' color='text.secondary'>
                 The wallet covers BSV fee automatically. After broadcast, the recipient
-                wallet picks up the UTXO via the indexer-driven scan on its next Refresh
-                (or via the demo /…/register-by-txid fast-path when colocated).
+                wallet picks up the UTXO via the indexer-driven scan on its next Refresh.
               </Typography>
               {sendResult && (
                 <Typography
