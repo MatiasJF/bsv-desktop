@@ -446,17 +446,43 @@ export default function AssetsPage() {
 
   // Verify a set of holdings in the background and fold each verdict into state
   // as it lands. Fail-safe: the service never throws, so a WOC hiccup just
-  // leaves those outpoints `unknown`. Seed from the cache first so cards that
-  // were verified earlier render their badge immediately, before any network.
+  // leaves those outpoints `unknown`.
+  //
+  // Two-tier persistence: the durable store is the wallet DB
+  // (`token_verifications`, migration 0004) — we seed the verifier from it so
+  // a re-opened wallet shows badges with zero network, then re-verify only the
+  // outpoints the DB doesn't already have settled. Each freshly settled verdict
+  // is written back to the DB. The verifier's own map is just the session cache.
   const verifyHoldings = useCallback(
     async (rows: OutputView[]) => {
-      const seeded = new Map<string, OutpointVerification>()
-      for (const o of rows) {
-        const cached = verifier.peek(o)
-        if (cached) seeded.set(cached.outpoint, cached)
-      }
-      if (seeded.size) setVerifications((prev) => new Map([...prev, ...seeded]))
+      if (!identityKey || !chain) return
 
+      // 1. Seed from the DB — instant badges from a prior session.
+      try {
+        const persisted: any[] = (await stasQuery(identityKey, chain, 'listTokenVerifications', [])) ?? []
+        const byOutpoint = new Map(persisted.map((r) => [`${r.txid}_${r.vout}`, r]))
+        const seed: Array<{ output: { txid: string; vout: number; protocol: TokenProtocolId }; verdict: OutpointVerification }> = []
+        const seededState = new Map<string, OutpointVerification>()
+        for (const o of rows) {
+          const r = byOutpoint.get(`${o.txid}_${o.vout}`)
+          if (!r) continue
+          const verdict: OutpointVerification = {
+            outpoint: `${o.txid}_${o.vout}`,
+            result: r.result,
+            reason: r.reason ?? undefined,
+            genesis: r.genesis ?? undefined,
+            genesisDepth: r.genesisDepth ?? undefined,
+          }
+          seed.push({ output: { txid: o.txid, vout: o.vout, protocol: o.protocol }, verdict })
+          seededState.set(verdict.outpoint, verdict)
+        }
+        verifier.seed(seed)
+        if (seededState.size) setVerifications((prev) => new Map([...prev, ...seededState]))
+      } catch {
+        /* DB seed is best-effort; verification below still runs from scratch */
+      }
+
+      // 2. Verify (cache-first) and persist each newly settled verdict.
       for (const o of rows) {
         const v = await verifier.verifyOutput(o)
         setVerifications((prev) => {
@@ -464,9 +490,27 @@ export default function AssetsPage() {
           next.set(v.outpoint, v)
           return next
         })
+        if (v.result !== 'undetermined') {
+          try {
+            await stasQuery(identityKey, chain, 'upsertTokenVerification', [
+              {
+                txid: o.txid,
+                vout: o.vout,
+                protocol: o.protocol,
+                result: v.result,
+                genesis: v.genesis ?? null,
+                genesisDepth: v.genesisDepth ?? null,
+                reason: v.reason ?? null,
+                verifiedAt: new Date().toISOString(),
+              },
+            ])
+          } catch {
+            /* persistence is best-effort; the badge already rendered from state */
+          }
+        }
       }
     },
-    [verifier]
+    [verifier, identityKey, chain]
   )
 
   const loadHoldings = useCallback(async () => {

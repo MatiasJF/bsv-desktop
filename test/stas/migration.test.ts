@@ -41,9 +41,13 @@ async function freshDb() {
     connection: { filename: ':memory:' },
     useNullAsDefault: true,
   })
-  // Minimal stand-in for wallet-toolbox's `outputs` table (FK target of stas_outputs).
+  // Stand-in for wallet-toolbox's `outputs` table (FK target of stas_outputs).
+  // Migration 0002's DSTAS backfill joins on lockingScript + userId, so the
+  // stand-in must carry them or the whole chain fails at 0002.
   await db.schema.createTable('outputs', (t: any) => {
     t.integer('outputId').primary()
+    t.text('lockingScript')
+    t.integer('userId')
   })
   return db
 }
@@ -66,10 +70,13 @@ describe.skipIf(!sqliteAvailable)('STAS migration 0001', () => {
   test('is idempotent — a second run applies nothing new', async () => {
     const db = await freshDb()
     await db.migrate.latest(MIGRATOR)
+    const after1 = Number((await db('knex_migrations_stas').count('* as c'))[0].c)
     await db.migrate.latest(MIGRATOR)
+    const after2 = Number((await db('knex_migrations_stas').count('* as c'))[0].c)
 
-    const count = await db('knex_migrations_stas').count('* as c')
-    expect(Number((count[0] as any).c)).toBe(1)
+    // One ledger row per applied migration, unchanged by a repeat run.
+    expect(after1).toBeGreaterThan(0)
+    expect(after2).toBe(after1)
 
     await db.destroy()
   })
@@ -88,6 +95,44 @@ describe.skipIf(!sqliteAvailable)('STAS migration 0001', () => {
     }
     await db('stas_receive_contexts').insert(row)
     await expect(db('stas_receive_contexts').insert(row)).rejects.toThrow()
+
+    await db.destroy()
+  })
+})
+
+describe.skipIf(!sqliteAvailable)('STAS migration 0004 — token_verifications', () => {
+  test('creates the table and StasQueries roundtrips a verdict', async () => {
+    const db = await freshDb()
+    await db.migrate.latest(MIGRATOR)
+    expect(await db.schema.hasTable('token_verifications')).toBe(true)
+
+    const { StasQueries } = await import('../../electron/stas-queries')
+    const q = new StasQueries(db)
+
+    const now = new Date().toISOString()
+    await q.upsertTokenVerification({
+      txid: 'aa', vout: 0, protocol: 'stas', result: 'authentic',
+      genesis: 'aa_0', genesisDepth: 0, reason: null, verifiedAt: now,
+    })
+    // Upsert is keyed on the outpoint — a re-verify overwrites, not duplicates.
+    await q.upsertTokenVerification({
+      txid: 'aa', vout: 0, protocol: 'stas', result: 'not-authentic',
+      genesis: null, genesisDepth: null, reason: 'no-genesis', verifiedAt: now,
+    })
+    // A different outpoint is a separate row.
+    await q.upsertTokenVerification({
+      txid: 'bb', vout: 1, protocol: 'bsv-21', result: 'authentic',
+      genesis: 'bb_1', genesisDepth: 2, reason: null, verifiedAt: now,
+    })
+
+    const rows = await q.listTokenVerifications()
+    expect(rows).toHaveLength(2)
+    const aa = rows.find((r: any) => r.txid === 'aa')
+    expect(aa.result).toBe('not-authentic')
+    expect(aa.reason).toBe('no-genesis')
+    const bb = rows.find((r: any) => r.txid === 'bb')
+    expect(bb.protocol).toBe('bsv-21')
+    expect(bb.genesisDepth).toBe(2)
 
     await db.destroy()
   })

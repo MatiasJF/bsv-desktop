@@ -4,10 +4,11 @@
  * Wraps BackToGenesisClient with the two things the UI needs on top of the raw
  * endpoint:
  *
- *  1. A per-outpoint cache. An outpoint's provenance is immutable (barring a
- *     reorg), so we verify each `(std, txid, vout)` at most once per session and
- *     persist the verdict in localStorage. A grown wallet then costs zero WOC
- *     calls on a re-open, and a fresh receive costs exactly one.
+ *  1. A per-outpoint session cache. An outpoint's provenance is immutable
+ *     (barring a reorg), so we verify each `(std, txid, vout)` at most once per
+ *     session. Durable persistence across sessions lives in the wallet DB
+ *     (`token_verifications`, migration 0004), seeded by the caller — this
+ *     in-memory map is only the same-session accelerator on top of it.
  *
  *  2. A per-token aggregate. A token card groups several UTXOs; its badge is the
  *     worst verdict among them — one counterfeit output taints the card, and an
@@ -67,43 +68,28 @@ export function aggregateBadge(verdicts: OutpointVerification[]): VerificationBa
 export class TokenVerificationService {
   private readonly client: BackToGenesisClient;
   private readonly chain: 'main' | 'test';
-  private readonly cacheKey: string;
-  /** In-memory cache; mirror of the persisted map for the session. */
+  /** Same-session cache. Durable persistence is the wallet DB (see class doc). */
   private readonly cache = new Map<string, OutpointVerification>();
 
   constructor(opts: { chain?: 'main' | 'test'; client?: BackToGenesisClient } = {}) {
     this.chain = opts.chain ?? 'main';
     this.client = opts.client ?? new BackToGenesisClient({ chain: this.chain });
-    this.cacheKey = `tokenVerification:${this.chain}`;
-    this.loadPersisted();
   }
 
   private key(std: TokenStd, txid: string, vout: number): string {
     return `${std}:${txid}_${vout}`;
   }
 
-  private loadPersisted(): void {
-    try {
-      const raw = localStorage.getItem(this.cacheKey);
-      if (!raw) return;
-      const obj = JSON.parse(raw) as Record<string, OutpointVerification>;
-      for (const [k, v] of Object.entries(obj)) this.cache.set(k, v);
-    } catch {
-      /* corrupt cache — ignore, re-verify from scratch */
-    }
-  }
-
-  private persist(): void {
-    try {
-      // Persist only settled verdicts. `undetermined` is transient (a 429 or a
-      // not-yet-propagated tx) and must be retried on the next load, not frozen.
-      const obj: Record<string, OutpointVerification> = {};
-      for (const [k, v] of this.cache.entries()) {
-        if (v.result !== 'undetermined') obj[k] = v;
-      }
-      localStorage.setItem(this.cacheKey, JSON.stringify(obj));
-    } catch {
-      /* quota / unavailable — cache stays in-memory only */
+  /**
+   * Seed the session cache from durable storage (the wallet DB). Lets a card's
+   * badge render from a prior session's verdict before any network call. Only
+   * settled verdicts should be seeded — an `undetermined` must be re-verified.
+   */
+  seed(entries: Array<{ output: VerifiableOutput; verdict: OutpointVerification }>): void {
+    for (const { output, verdict } of entries) {
+      if (verdict.result === 'undetermined') continue;
+      const std = PROTOCOL_TO_STD[output.protocol];
+      this.cache.set(this.key(std, output.txid, output.vout), verdict);
     }
   }
 
@@ -138,7 +124,6 @@ export class TokenVerificationService {
       genesisDepth: res.genesisDepth,
     };
     this.cache.set(k, verdict);
-    this.persist();
     return verdict;
   }
 

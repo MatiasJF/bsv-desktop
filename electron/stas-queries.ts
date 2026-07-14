@@ -44,6 +44,22 @@ export interface StasOutputRow {
   protocol?: TokenProtocolId;
 }
 
+/** A persisted Back-to-Genesis verdict for one token outpoint (migration 0004). */
+export interface TokenVerificationRow {
+  txid: string;
+  vout: number;
+  protocol: TokenProtocolId;
+  /** Only settled verdicts are stored. */
+  result: 'authentic' | 'not-authentic';
+  /** Resolved genesis `<txid>_<vout>`; null/undefined when none was resolved. */
+  genesis?: string | null;
+  genesisDepth?: number | null;
+  /** Present when `not-authentic`. */
+  reason?: string | null;
+  /** ISO timestamp of when the verdict was recorded. */
+  verifiedAt: string;
+}
+
 export interface StasReceiveContextRow {
   profileIdentityKey: string;
   keyIndex: number;
@@ -152,6 +168,31 @@ export class StasQueries {
 
   async insertStasOutput(row: StasOutputRow): Promise<void> {
     await this.knex('stas_outputs').insert(row);
+  }
+
+  /**
+   * Persist a settled Back-to-Genesis verdict for one outpoint (migration
+   * 0004). Standard-agnostic — STAS/DSTAS/BSV-21 all use it. Callers must pass
+   * only SETTLED verdicts (`authentic` / `not-authentic`); an `undetermined`
+   * result means "couldn't decide yet" and must be retried, never stored.
+   * Idempotent upsert keyed on the outpoint (re-verifying overwrites).
+   */
+  async upsertTokenVerification(row: TokenVerificationRow): Promise<void> {
+    const existing = await this.knex('token_verifications')
+      .where({ txid: row.txid, vout: row.vout })
+      .first();
+    if (existing) {
+      await this.knex('token_verifications')
+        .where({ txid: row.txid, vout: row.vout })
+        .update(row);
+    } else {
+      await this.knex('token_verifications').insert(row);
+    }
+  }
+
+  /** Every stored verdict — the renderer seeds its badge state from this. */
+  async listTokenVerifications(): Promise<TokenVerificationRow[]> {
+    return this.knex('token_verifications').select('*');
   }
 
   /**

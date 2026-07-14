@@ -24,17 +24,7 @@ function stubClient(byTxid: Record<string, any>) {
   } as any
 }
 
-// The electron vitest env is `node` (no localStorage) — shim a minimal one so
-// the persistence path is exercised exactly as it runs in the renderer.
-beforeEach(() => {
-  const store = new Map<string, string>()
-  ;(globalThis as any).localStorage = {
-    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
-    setItem: (k: string, v: string) => void store.set(k, v),
-    removeItem: (k: string) => void store.delete(k),
-    clear: () => store.clear(),
-  }
-})
+beforeEach(() => vi.clearAllMocks())
 
 describe('aggregateBadge — worst verdict wins', () => {
   const v = (result: string): OutpointVerification => ({ outpoint: 'x_0', result: result as any })
@@ -86,25 +76,30 @@ describe('caching', () => {
     expect(client.verify).toHaveBeenCalledTimes(2)
   })
 
-  test('settled verdicts persist across service instances; undetermined does not', async () => {
-    const c1 = stubClient({
-      good: { result: 'authentic', genesis: { txid: 'good', index: 0 } },
-      pend: { result: 'undetermined', reason: 'source-unavailable' },
-    })
-    const svc1 = new TokenVerificationService({ chain: 'main', client: c1 })
-    await svc1.verifyOutput({ txid: 'good', vout: 0, protocol: 'stas' })
-    await svc1.verifyOutput({ txid: 'pend', vout: 0, protocol: 'stas' })
+  test('seed() primes the cache from durable storage; a seeded outpoint is not re-fetched', async () => {
+    const client = stubClient({ good: { result: 'authentic', genesis: { txid: 'good', index: 0 } } })
+    const svc = new TokenVerificationService({ chain: 'main', client })
+    svc.seed([
+      {
+        output: { txid: 'good', vout: 0, protocol: 'stas' },
+        verdict: { outpoint: 'good_0', result: 'authentic', genesis: 'good_0' },
+      },
+    ])
+    await svc.verifyOutput({ txid: 'good', vout: 0, protocol: 'stas' })
+    expect(client.verify).not.toHaveBeenCalled()
+  })
 
-    // New instance shares localStorage — 'good' is cached, 'pend' is not.
-    const c2 = stubClient({
-      good: { result: 'authentic', genesis: { txid: 'good', index: 0 } },
-      pend: { result: 'authentic', genesis: { txid: 'pend', index: 0 } },
-    })
-    const svc2 = new TokenVerificationService({ chain: 'main', client: c2 })
-    await svc2.verifyOutput({ txid: 'good', vout: 0, protocol: 'stas' })
-    await svc2.verifyOutput({ txid: 'pend', vout: 0, protocol: 'stas' })
-    expect(c2.verify).toHaveBeenCalledTimes(1) // only 'pend' re-fetched
-    expect(c2.verify).toHaveBeenCalledWith('stas', 'pend', 0, expect.anything())
+  test('seed() ignores undetermined verdicts (they must be re-verified)', async () => {
+    const client = stubClient({ pend: { result: 'authentic', genesis: { txid: 'pend', index: 0 } } })
+    const svc = new TokenVerificationService({ chain: 'main', client })
+    svc.seed([
+      {
+        output: { txid: 'pend', vout: 0, protocol: 'stas' },
+        verdict: { outpoint: 'pend_0', result: 'undetermined', reason: 'source-unavailable' },
+      },
+    ])
+    await svc.verifyOutput({ txid: 'pend', vout: 0, protocol: 'stas' })
+    expect(client.verify).toHaveBeenCalledTimes(1) // seed skipped it; had to fetch
   })
 })
 
