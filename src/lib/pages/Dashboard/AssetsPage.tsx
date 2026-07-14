@@ -304,9 +304,10 @@ function protocolLabel(p: TokenProtocolId): string {
  *   from "couldn't decide" (B2G returned undetermined — a deep chain or an
  *   unavailable source). Neither is a counterfeit; both fail safe.
  */
-function TokenVerificationChip({ group }: { group: TokenGroup }) {
+function TokenVerificationChip({ group, onReverify }: { group: TokenGroup; onReverify?: () => void }) {
   const pending = group.outputs.some((o) => !o.verification)
   if (pending && group.badge !== 'counterfeit') {
+    // Mid-flight — no re-verify affordance while a check is already running.
     return (
       <Chip
         size='small'
@@ -316,25 +317,35 @@ function TokenVerificationChip({ group }: { group: TokenGroup }) {
       />
     )
   }
+  // A settled badge is never re-checked automatically. Clicking it is the
+  // explicit re-verify — stop the click from also toggling the card's expand.
+  const reverify = onReverify
+    ? (e: React.MouseEvent) => {
+        e.stopPropagation()
+        onReverify()
+      }
+    : undefined
+  const hint = reverify ? ' · click to re-verify' : ''
+
   if (group.badge === 'verified') {
     const genesis = [...group.genesisSet][0]
     return (
-      <Tooltip title={genesis ? `Provenance verified to genesis ${genesis}` : 'Provenance verified to its genesis mint'}>
-        <Chip size='small' color='success' variant='outlined' icon={<VerifiedIcon />} label='Verified' />
+      <Tooltip title={`${genesis ? `Provenance verified to genesis ${genesis}` : 'Provenance verified to its genesis mint'}${hint}`}>
+        <Chip size='small' color='success' variant='outlined' icon={<VerifiedIcon />} label='Verified' onClick={reverify} clickable={!!reverify} />
       </Tooltip>
     )
   }
   if (group.badge === 'counterfeit') {
     const reason = group.outputs.find((o) => o.verification?.result === 'not-authentic')?.verification?.reason
     return (
-      <Tooltip title={`Does not descend from a genuine mint${reason ? ` (${reason})` : ''} — do not trust`}>
-        <Chip size='small' color='error' variant='filled' icon={<GppBadIcon />} label='Counterfeit' />
+      <Tooltip title={`Does not descend from a genuine mint${reason ? ` (${reason})` : ''} — do not trust${hint}`}>
+        <Chip size='small' color='error' variant='filled' icon={<GppBadIcon />} label='Counterfeit' onClick={reverify} clickable={!!reverify} />
       </Tooltip>
     )
   }
   return (
-    <Tooltip title='Provenance could not be determined — treat as unverified, not as fake'>
-      <Chip size='small' variant='outlined' icon={<HelpOutlineIcon />} label='Unverified' />
+    <Tooltip title={`Provenance could not be determined — treat as unverified, not as fake${hint}`}>
+      <Chip size='small' variant='outlined' icon={<HelpOutlineIcon />} label='Unverified' onClick={reverify} clickable={!!reverify} />
     </Tooltip>
   )
 }
@@ -444,20 +455,26 @@ export default function AssetsPage() {
     [chain, b2gClient]
   )
 
-  // Verify a set of holdings in the background and fold each verdict into state
-  // as it lands. Fail-safe: the service never throws, so a WOC hiccup just
-  // leaves those outpoints `unknown`.
+  // Verify a set of holdings and fold each verdict into state. Fail-safe: the
+  // service never throws, so a WOC hiccup just leaves those outpoints `unknown`.
   //
-  // Two-tier persistence: the durable store is the wallet DB
-  // (`token_verifications`, migration 0004) — we seed the verifier from it so
-  // a re-opened wallet shows badges with zero network, then re-verify only the
-  // outpoints the DB doesn't already have settled. Each freshly settled verdict
-  // is written back to the DB. The verifier's own map is just the session cache.
+  // A settled verdict is FINAL: an outpoint's provenance can't change (a reorg
+  // aside), so once we know it we never call the endpoint for it again — not on
+  // the next load, not on Refresh. Only outpoints with no settled verdict yet
+  // are verified. Pass `{ force: true }` to deliberately re-check (the badge's
+  // click handler does this).
+  //
+  // Durable store is the wallet DB (`token_verifications`, migration 0004): we
+  // seed from it so a re-opened wallet shows badges with zero network, and only
+  // freshly obtained verdicts are written back.
   const verifyHoldings = useCallback(
-    async (rows: OutputView[]) => {
+    async (rows: OutputView[], opts: { force?: boolean } = {}) => {
       if (!identityKey || !chain) return
+      const force = opts.force === true
 
-      // 1. Seed from the DB — instant badges from a prior session.
+      // 1. Seed from the DB — instant badges, and the record of what's already
+      //    settled so we can skip it below.
+      const settled = new Set<string>()
       try {
         const persisted: any[] = (await stasQuery(identityKey, chain, 'listTokenVerifications', [])) ?? []
         const byOutpoint = new Map(persisted.map((r) => [`${r.txid}_${r.vout}`, r]))
@@ -475,6 +492,7 @@ export default function AssetsPage() {
           }
           seed.push({ output: { txid: o.txid, vout: o.vout, protocol: o.protocol }, verdict })
           seededState.set(verdict.outpoint, verdict)
+          settled.add(verdict.outpoint) // DB only ever holds settled verdicts
         }
         verifier.seed(seed)
         if (seededState.size) setVerifications((prev) => new Map([...prev, ...seededState]))
@@ -482,9 +500,18 @@ export default function AssetsPage() {
         /* DB seed is best-effort; verification below still runs from scratch */
       }
 
-      // 2. Verify (cache-first) and persist each newly settled verdict.
+      // 2. Verify ONLY the outpoints without a settled verdict — from the DB
+      //    above, or from a verdict reached earlier this session. Each verified
+      //    result is persisted; already-settled ones are neither re-fetched nor
+      //    re-written. `force` overrides the skip for an explicit re-check.
       for (const o of rows) {
-        const v = await verifier.verifyOutput(o)
+        const op = `${o.txid}_${o.vout}`
+        if (!force) {
+          if (settled.has(op)) continue
+          const cached = verifier.peek(o)
+          if (cached && cached.result !== 'undetermined') continue
+        }
+        const v = await verifier.verifyOutput(o, { force })
         setVerifications((prev) => {
           const next = new Map(prev)
           next.set(v.outpoint, v)
@@ -1217,7 +1244,7 @@ export default function AssetsPage() {
                       color={g.protocol === 'stas' ? 'primary' : 'default'}
                       variant={g.protocol === 'stas' ? 'filled' : 'outlined'}
                     />
-                    <TokenVerificationChip group={g} />
+                    <TokenVerificationChip group={g} onReverify={() => verifyHoldings(g.outputs, { force: true })} />
                     <Chip
                       size='small'
                       label={

@@ -76,6 +76,14 @@ describe('caching', () => {
     expect(client.verify).toHaveBeenCalledTimes(2)
   })
 
+  test('force re-fetches a settled verdict (the explicit re-verify path)', async () => {
+    const client = stubClient({ tx1: { result: 'authentic', genesis: { txid: 'tx1', index: 0 } } })
+    const svc = new TokenVerificationService({ chain: 'main', client })
+    await svc.verifyOutput({ txid: 'tx1', vout: 0, protocol: 'stas' })
+    await svc.verifyOutput({ txid: 'tx1', vout: 0, protocol: 'stas' }, { force: true })
+    expect(client.verify).toHaveBeenCalledTimes(2) // cache bypassed only under force
+  })
+
   test('seed() primes the cache from durable storage; a seeded outpoint is not re-fetched', async () => {
     const client = stubClient({ good: { result: 'authentic', genesis: { txid: 'good', index: 0 } } })
     const svc = new TokenVerificationService({ chain: 'main', client })
