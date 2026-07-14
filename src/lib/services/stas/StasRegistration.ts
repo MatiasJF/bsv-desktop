@@ -15,6 +15,7 @@
 import type { AtomicBEEF, WalletInterface } from '@bsv/sdk';
 import { STAS_BASKET } from '../../constants/baskets';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
+import { verifyAndPersistOnReceive } from '../tokens/verifyOnReceive';
 import type { ParsedDstas } from './dstasParser';
 
 /** Classic-STAS parsed payload extends ParsedDstas with optional symbol. */
@@ -232,6 +233,11 @@ export class StasRegistration {
         console.warn(`[StasRegistration] satellite linkage failed for ${txid}:${vout}`, err);
       }
     }
+
+    // Verify provenance the moment the token is ours — covers both the discovery
+    // scan and peer-accept paths (both land here). Fire-and-forget; never blocks
+    // the receive. `protocol.id` is 'stas' | 'dstas' | 'bsv-21'.
+    verifyAndPersistOnReceive(this.identityKey, this.chain, { txid, vout, protocol: protocol.id });
 
     return { registered: true, txid, vout, outputId };
   }

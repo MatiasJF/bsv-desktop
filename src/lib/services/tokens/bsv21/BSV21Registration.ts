@@ -22,6 +22,7 @@ import type { WalletInterface } from '@bsv/sdk';
 import { BSV21_BASKET } from '../../../constants/baskets';
 import { BSV21_PROTOCOL_ID, BSV21_COUNTERPARTY } from './constants';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
+import { verifyAndPersistOnReceive } from '../verifyOnReceive';
 
 const ORIGINATOR = 'admin.bsv21-discovery';
 
@@ -149,6 +150,9 @@ export class BSV21Registration {
     } catch (err) {
       console.warn(`[BSV21Registration] post-internalize step failed for ${txid}:${vout}`, err);
     }
+
+    // Verify provenance on receive (the BSV-21 discovery path). Fire-and-forget.
+    verifyAndPersistOnReceive(this.identityKey, this.chain, { txid, vout, protocol: 'bsv-21' });
 
     return { registered: true, txid, vout, outputId };
   }

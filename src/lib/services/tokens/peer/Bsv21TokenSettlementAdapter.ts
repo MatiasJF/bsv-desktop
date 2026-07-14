@@ -17,6 +17,7 @@ import { Hash, Utils, createNonce, Beef } from '@bsv/sdk';
 import { BSV21TransferService, type BSV21TransferDeps } from '../bsv21/BSV21TransferService';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { parseBsv21LockingScript } from '../bsv21/inscription';
+import { verifyAndPersistOnReceive } from '../verifyOnReceive';
 import { BSV21_PROTOCOL_ID } from '../bsv21/constants';
 import { BSV21_BASKET } from '../../../constants/baskets';
 import type {
@@ -189,6 +190,21 @@ export class Bsv21TokenSettlementAdapter implements TokenSettlementAdapter {
         } as any,
         ORIGINATOR
       );
+
+      // Verify provenance on receive. This peer path internalizes directly
+      // (bypassing BSV21Registration), so it needs its own hook. Fire-and-forget.
+      try {
+        const beef = Beef.fromBinary(settlement.transaction);
+        const txid = (beef as any).atomicTxid as string | undefined
+          ?? (beef as any).txs?.[(beef as any).txs.length - 1]?.txid;
+        if (txid) {
+          verifyAndPersistOnReceive(this.deps.identityKey, this.chain, {
+            txid,
+            vout: settlement.outputIndex,
+            protocol: 'bsv-21',
+          });
+        }
+      } catch { /* best-effort — the Assets load-time pass is the backstop */ }
 
       return { action: 'accept', receiptData: { internalizeResult } };
     } catch (err) {
