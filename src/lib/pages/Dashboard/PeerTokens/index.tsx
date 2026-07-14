@@ -18,7 +18,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh'
 import { toast } from 'react-toastify'
 import { WalletContext } from '../../../WalletContext'
-import type { IncomingToken, SendTokenParams } from '../../../services/tokens/peer/PeerTokenClient'
+import type { IncomingToken, SendTokenParams } from '@bsv/message-box-client'
 import { loadPeerHoldings, type PeerHolding as Holding } from '../../../services/tokens/peer/loadPeerHoldings'
 
 interface TokenTx {

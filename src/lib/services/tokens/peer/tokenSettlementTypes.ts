@@ -1,73 +1,40 @@
 /**
- * Local mirror of @bsv/message-box-client's TokenSettlementAdapter contract.
+ * The TokenSettlementAdapter contract now ships in @bsv/message-box-client
+ * (>=2.1), so this file no longer mirrors it — it re-exports the published
+ * types and adds the one field bsv-desktop needs that upstream leaves to the
+ * adapter's discretion.
  *
- * bsv-desktop depends on the *published* @bsv/message-box-client (2.0.x), which
- * does not yet export these types. The shapes here are structurally identical
- * to the upstream `TokenSettlementAdapter.ts`, so a concrete adapter written
- * against this mirror is assignable to the published interface after the
- * version bump — at which point this file can be deleted and the imports
- * repointed at the package.
+ * Upstream's `TokenSourceRef` carries an index signature (`[key: string]:
+ * unknown`) for exactly this: standard-specific extras it passes through to the
+ * adapter without interpreting. We use it for `owner` — the BRC-29 derivation
+ * override under which a *received* token is held. Typing it here keeps the
+ * adapters type-safe instead of casting `unknown` at every read.
  */
-import type { WalletInterface } from '@bsv/sdk';
+import type { TokenSourceRef as UpstreamTokenSourceRef } from '@bsv/message-box-client';
 
-export interface TokenSourceRef {
-  txid: string;
-  outputIndex: number;
-  lockingScriptHex: string;
-  satoshis: number;
-  protocol: string;
-  assetId: string;
-  brc42KeyId?: string;
-  /**
-   * Present when re-sending a BRC-29-received token. The owner key is derived
-   * with counterparty = original sender and `forSelf: true` (the recipient's
-   * OWN key in the shared derivation, which is what owns the UTXO).
-   */
-  owner?: { protocolID?: [number, string]; keyID: string; counterparty: string; forSelf?: boolean };
-  [key: string]: unknown;
+export type {
+  TokenSettlementArtifact,
+  TokenAdapterContext,
+  TokenBuildResult,
+  TokenAcceptResult,
+  TokenSettlementAdapter,
+  Termination,
+} from '@bsv/message-box-client';
+
+/**
+ * Owner-key derivation for a token the wallet RECEIVED over a peer channel.
+ * Such a UTXO is locked to our key derived with `counterparty = the original
+ * sender` (BRC-29), not to our plain self-derived receive key — so re-spending
+ * it requires replaying that derivation with `forSelf: true`.
+ */
+export interface TokenOwnerOverride {
+  protocolID?: [number, string];
+  keyID: string;
+  counterparty: string;
+  /** True for a BRC-29-received token: derive the recipient's OWN key. */
+  forSelf?: boolean;
 }
 
-export interface TokenSettlementArtifact {
-  customInstructions: { derivationPrefix: string; derivationSuffix: string };
-  transaction: number[];
-  protocol: string;
-  assetId: string;
-  amount: string;
-  outputIndex: number;
-  /** Broadcast txid of the transfer (for explorer links / diagnostics). */
-  txid?: string;
-}
-
-export interface TokenAdapterContext {
-  wallet: WalletInterface;
-  originator?: string;
-  logger?: { log: (...a: any[]) => void; warn: (...a: any[]) => void; error: (...a: any[]) => void };
-  /**
-   * When true, the adapter MUST NOT touch the chain: derive the recipient
-   * address + validate inputs only, then return a preview artifact with an
-   * empty `transaction`. No createAction / signAction / broadcast.
-   */
-  dryRun?: boolean;
-}
-
-export interface Termination { code: string; message: string }
-
-export type TokenBuildResult =
-  | { action: 'settle'; artifact: TokenSettlementArtifact }
-  | { action: 'terminate'; termination: Termination };
-
-export type TokenAcceptResult =
-  | { action: 'accept'; receiptData?: { internalizeResult?: unknown } }
-  | { action: 'terminate'; termination: Termination };
-
-export interface TokenSettlementAdapter {
-  readonly protocol: string;
-  buildTokenSettlement: (
-    args: { recipient: string; source: TokenSourceRef; amount: string },
-    ctx: TokenAdapterContext
-  ) => Promise<TokenBuildResult>;
-  acceptTokenSettlement: (
-    args: { sender: string; settlement: TokenSettlementArtifact },
-    ctx: TokenAdapterContext
-  ) => Promise<TokenAcceptResult>;
+export interface TokenSourceRef extends UpstreamTokenSourceRef {
+  owner?: TokenOwnerOverride;
 }

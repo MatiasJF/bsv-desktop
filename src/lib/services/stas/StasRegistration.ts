@@ -12,7 +12,7 @@
  *      wallet-toolbox `outputs.outputId`
  */
 
-import type { WalletInterface } from '@bsv/sdk';
+import type { AtomicBEEF, WalletInterface } from '@bsv/sdk';
 import { STAS_BASKET } from '../../constants/baskets';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 import type { ParsedDstas } from './dstasParser';
@@ -59,7 +59,7 @@ export interface RegisterStasArgs {
    * a possibly-unpropagated tx from the network. When omitted, a chained
    * AtomicBEEF is assembled from `txid` (the discovery default).
    */
-  atomicBeef?: number[];
+  atomicBeef?: AtomicBEEF;
   /**
    * Skip the internalizeAction step and only link the satellite tables. Used
    * when the output's basket was already declared at createAction time (a
@@ -115,7 +115,7 @@ export class StasRegistration {
     //    When skipInternalize is set, the BEEF is never used (we don't
     //    internalize), so DON'T build it — building it would re-fetch the
     //    just-broadcast tx from WoC and 404, failing the whole registration.
-    let atomicBeef: number[] = args.atomicBeef ?? [];
+    let atomicBeef: AtomicBEEF = args.atomicBeef ?? [];
     if (args.skipInternalize !== true && atomicBeef.length === 0) {
       try {
         const built = await buildChainedAtomicBeef({ wallet: this.wallet, txid });
