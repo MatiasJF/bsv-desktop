@@ -38,6 +38,9 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import SendIcon from '@mui/icons-material/Send'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import TokenIcon from '@mui/icons-material/Token'
+import VerifiedIcon from '@mui/icons-material/Verified'
+import GppBadIcon from '@mui/icons-material/GppBad'
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import SearchIcon from '@mui/icons-material/Search'
 import { QRCodeSVG } from 'qrcode.react'
@@ -47,6 +50,12 @@ import { stasQuery } from '../../services/stas'
 import type { TokenProtocolId, Bsv21SendExtras } from '../../services/tokens'
 import { parseBsv21LockingScript } from '../../services/tokens'
 import { BSV21_BASKET } from '../../constants/baskets'
+import {
+  TokenVerificationService,
+  aggregateBadge,
+  type OutpointVerification,
+  type VerificationBadge,
+} from '../../services/tokens/TokenVerificationService'
 
 interface OutputView {
   outpoint: string
@@ -79,6 +88,8 @@ interface OutputView {
   decimals: number
   /** Optional icon URL/outpoint for BSV-21. */
   icon: string | null
+  /** Back-to-Genesis verdict for this outpoint; undefined until verified. */
+  verification?: OutpointVerification
 }
 
 interface TokenGroup {
@@ -92,6 +103,15 @@ interface TokenGroup {
   outputs: OutputView[]
   /** Protocol this group represents — distinct protocols never merge. */
   protocol: TokenProtocolId
+  /**
+   * Resolved genesis outpoints across this group's UTXOs. For classic STAS the
+   * tokenId is only the issuer PKH (shared by every token that issuer minted),
+   * so the genesis is the real identity — a group keyed on it can't be spoofed
+   * by a same-symbol relabel. Empty until B2G verification resolves.
+   */
+  genesisSet: Set<string>
+  /** Card-level provenance rollup (worst outpoint verdict wins). */
+  badge: VerificationBadge
   /** Sum of `tokenAmount` across outputs in this group (stringified bigint). */
   tokenAmount: string
   /** Same, but only for spendable outputs. */
@@ -118,12 +138,17 @@ function safeBigInt(s: string | null | undefined): bigint {
 function groupByToken(outputs: OutputView[]): TokenGroup[] {
   const byKey = new Map<string, TokenGroup>()
   for (const o of outputs) {
-    // Key on (protocol, symbol, tokenId) so a DSTAS and STAS that happen
-    // to share a symbol never collapse into one card. Empty tokenId falls
-    // back to (protocol, symbol).
-    const key = o.tokenId
-      ? `${o.protocol}::${o.symbol ?? '?'}::${o.tokenId}`
-      : `${o.protocol}::${o.symbol ?? 'unknown'}`
+    // Identity key. Prefer the resolved genesis outpoint: for classic STAS the
+    // tokenId is just the issuer PKH, so two genuinely different tokens from one
+    // issuer share it — and a counterfeit deliberately reuses it. Keying on
+    // genesis keeps EXSTAS2 (or a forgery) from collapsing into EXSTAS1's card.
+    // Falls back to (protocol, symbol, tokenId) until verification resolves.
+    const genesis = o.verification?.genesis
+    const key = genesis
+      ? `${o.protocol}::genesis::${genesis}`
+      : o.tokenId
+        ? `${o.protocol}::${o.symbol ?? '?'}::${o.tokenId}`
+        : `${o.protocol}::${o.symbol ?? 'unknown'}`
     let g = byKey.get(key)
     if (!g) {
       g = {
@@ -139,6 +164,8 @@ function groupByToken(outputs: OutputView[]): TokenGroup[] {
         tokenAmount: '0',
         spendableTokenAmount: '0',
         decimals: o.decimals,
+        genesisSet: new Set(),
+        badge: 'unknown',
       }
       byKey.set(key, g)
     }
@@ -153,8 +180,15 @@ function groupByToken(outputs: OutputView[]): TokenGroup[] {
       g.spendableTokenAmount = (safeBigInt(g.spendableTokenAmount) + safeBigInt(o.tokenAmount)).toString()
     }
     if (o.tokenId) g.tokenIds.add(o.tokenId)
+    if (genesis) g.genesisSet.add(genesis)
     if (!g.name && o.name) g.name = o.name
     g.outputs.push(o)
+  }
+  // Compute each card's provenance rollup from its outputs' verdicts.
+  for (const g of byKey.values()) {
+    g.badge = aggregateBadge(
+      g.outputs.map((o) => o.verification).filter((v): v is OutpointVerification => !!v)
+    )
   }
   // Sort by spendable-amount descending. BigInt-safe comparator.
   return Array.from(byKey.values()).sort((a, b) => {
@@ -260,6 +294,51 @@ function protocolLabel(p: TokenProtocolId): string {
   }
 }
 
+/**
+ * Back-to-Genesis provenance chip for a token card.
+ *
+ * - verified    → green: every UTXO traced to a genesis mint.
+ * - counterfeit → red: at least one UTXO failed a provenance rule (does not
+ *   descend from a real mint). The dangerous case — the reason is shown.
+ * - unknown     → grey. Distinguish "still checking" (a UTXO not yet verified)
+ *   from "couldn't decide" (B2G returned undetermined — a deep chain or an
+ *   unavailable source). Neither is a counterfeit; both fail safe.
+ */
+function TokenVerificationChip({ group }: { group: TokenGroup }) {
+  const pending = group.outputs.some((o) => !o.verification)
+  if (pending && group.badge !== 'counterfeit') {
+    return (
+      <Chip
+        size='small'
+        variant='outlined'
+        icon={<CircularProgress size={12} />}
+        label='Verifying…'
+      />
+    )
+  }
+  if (group.badge === 'verified') {
+    const genesis = [...group.genesisSet][0]
+    return (
+      <Tooltip title={genesis ? `Provenance verified to genesis ${genesis}` : 'Provenance verified to its genesis mint'}>
+        <Chip size='small' color='success' variant='outlined' icon={<VerifiedIcon />} label='Verified' />
+      </Tooltip>
+    )
+  }
+  if (group.badge === 'counterfeit') {
+    const reason = group.outputs.find((o) => o.verification?.result === 'not-authentic')?.verification?.reason
+    return (
+      <Tooltip title={`Does not descend from a genuine mint${reason ? ` (${reason})` : ''} — do not trust`}>
+        <Chip size='small' color='error' variant='filled' icon={<GppBadIcon />} label='Counterfeit' />
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip title='Provenance could not be determined — treat as unverified, not as fake'>
+      <Chip size='small' variant='outlined' icon={<HelpOutlineIcon />} label='Unverified' />
+    </Tooltip>
+  )
+}
+
 function hash160ToAddress(hash160Hex: string): string {
   return new (Address as any)(fromHex(hash160Hex)).Value as string
 }
@@ -290,6 +369,9 @@ export default function AssetsPage() {
 
   const [holdings, setHoldings] = useState<OutputView[]>([])
   const [sentHoldings, setSentHoldings] = useState<OutputView[]>([])
+  // Back-to-Genesis verdicts, keyed by `${txid}_${vout}`. Filled in the
+  // background after holdings load; merged into the grouped view as they arrive.
+  const [verifications, setVerifications] = useState<Map<string, OutpointVerification>>(new Map())
   const [activityExpanded, setActivityExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
@@ -348,6 +430,44 @@ export default function AssetsPage() {
 
   const identityKey = stas?.keyDeriver?.identityKey
   const chain = stas?.keyDeriver?.chain
+
+  // One verification service per chain — it owns the per-outpoint cache, so a
+  // re-open of the page verifies only newly-arrived tokens. Reuses the
+  // wallet-wide BackToGenesisClient when present (avoids a duplicate instance).
+  const b2gClient = stas?.backToGenesis
+  const verifier = useMemo(
+    () =>
+      new TokenVerificationService({
+        chain: (chain as 'main' | 'test') ?? 'main',
+        client: b2gClient,
+      }),
+    [chain, b2gClient]
+  )
+
+  // Verify a set of holdings in the background and fold each verdict into state
+  // as it lands. Fail-safe: the service never throws, so a WOC hiccup just
+  // leaves those outpoints `unknown`. Seed from the cache first so cards that
+  // were verified earlier render their badge immediately, before any network.
+  const verifyHoldings = useCallback(
+    async (rows: OutputView[]) => {
+      const seeded = new Map<string, OutpointVerification>()
+      for (const o of rows) {
+        const cached = verifier.peek(o)
+        if (cached) seeded.set(cached.outpoint, cached)
+      }
+      if (seeded.size) setVerifications((prev) => new Map([...prev, ...seeded]))
+
+      for (const o of rows) {
+        const v = await verifier.verifyOutput(o)
+        setVerifications((prev) => {
+          const next = new Map(prev)
+          next.set(v.outpoint, v)
+          return next
+        })
+      }
+    },
+    [verifier]
+  )
 
   const loadHoldings = useCallback(async () => {
     if (!identityKey || !chain) return
@@ -419,7 +539,11 @@ export default function AssetsPage() {
         }
       }
 
-      setHoldings([...stasHoldings, ...bsv21Holdings])
+      const combined = [...stasHoldings, ...bsv21Holdings]
+      setHoldings(combined)
+      // Kick off Back-to-Genesis verification in the background — the card
+      // badges fill in as verdicts arrive; holdings render immediately.
+      void verifyHoldings(combined)
 
       // Sent = anything from the "all" set that has spentBy set (and isn't in
       // the current set). Newest first by createdAt (best proxy we have).
@@ -433,7 +557,7 @@ export default function AssetsPage() {
     } finally {
       setLoading(false)
     }
-  }, [identityKey, chain, wallet])
+  }, [identityKey, chain, wallet, verifyHoldings])
 
   // Wraps loadHoldings with a real Bitails discovery scan first — picks up
   // STAS that arrived after the wallet's startup auto-scan. Without this the
@@ -559,7 +683,19 @@ export default function AssetsPage() {
     }
   }, [stas?.bsv21Discovery, identityKey, chain, recoverTxid, recoverVout, loadHoldings])
 
-  const allGroups = useMemo(() => groupByToken(holdings), [holdings])
+  // Fold the latest B2G verdicts into each holding before grouping, so the
+  // grouping can key on genesis and the cards can badge. Kept as a derivation
+  // (not baked into `holdings`) so a verdict update re-groups without a reload.
+  const verifiedHoldings = useMemo(
+    () =>
+      holdings.map((o) => {
+        const v = verifications.get(`${o.txid}_${o.vout}`)
+        return v ? { ...o, verification: v } : o
+      }),
+    [holdings, verifications]
+  )
+
+  const allGroups = useMemo(() => groupByToken(verifiedHoldings), [verifiedHoldings])
 
   const groups = useMemo(() => {
     const needle = filter.trim().toLowerCase()
@@ -1030,13 +1166,14 @@ export default function AssetsPage() {
                       </Typography>
                     )}
                   </Typography>
-                  <Stack direction='row' spacing={1} sx={{ mt: 0.5 }}>
+                  <Stack direction='row' spacing={1} sx={{ mt: 0.5 }} flexWrap='wrap' useFlexGap>
                     <Chip
                       size='small'
                       label={protocolLabel(g.protocol)}
                       color={g.protocol === 'stas' ? 'primary' : 'default'}
                       variant={g.protocol === 'stas' ? 'filled' : 'outlined'}
                     />
+                    <TokenVerificationChip group={g} />
                     <Chip
                       size='small'
                       label={
@@ -1323,6 +1460,46 @@ export default function AssetsPage() {
         <DialogContent>
           {sendTarget && (
             <Stack spacing={2}>
+              {sendTarget.verification?.result === 'not-authentic' && (
+                <Box
+                  sx={{
+                    p: 1.5,
+                    borderRadius: 1,
+                    bgcolor: 'error.main',
+                    color: 'error.contrastText',
+                    display: 'flex',
+                    gap: 1,
+                    alignItems: 'flex-start',
+                  }}
+                >
+                  <GppBadIcon fontSize='small' />
+                  <Typography variant='caption'>
+                    <strong>This token failed provenance verification.</strong> It does not
+                    descend from a genuine mint
+                    {sendTarget.verification.reason ? ` (${sendTarget.verification.reason})` : ''} —
+                    it may be counterfeit. Forwarding it passes the problem to the recipient.
+                  </Typography>
+                </Box>
+              )}
+              {sendTarget.verification?.result === 'undetermined' && (
+                <Box
+                  sx={{
+                    p: 1.5,
+                    borderRadius: 1,
+                    bgcolor: 'warning.main',
+                    color: 'warning.contrastText',
+                    display: 'flex',
+                    gap: 1,
+                    alignItems: 'flex-start',
+                  }}
+                >
+                  <VerifiedIcon fontSize='small' />
+                  <Typography variant='caption'>
+                    Provenance could not be verified yet (unknown, not proven fake). You can
+                    still send, but the origin hasn't been confirmed to a genesis mint.
+                  </Typography>
+                </Box>
+              )}
               <Box>
                 <Typography variant='caption' color='text.secondary'>
                   Sending

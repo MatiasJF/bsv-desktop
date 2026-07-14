@@ -58,6 +58,7 @@ import {
   BSV21DiscoveryService,
 } from './tokens'
 import { WocTokenIndexerClient } from './tokens/woc/WocTokenIndexerClient'
+import { BackToGenesisClient } from './tokens/woc/BackToGenesisClient'
 import { DstasTransferService } from './tokens/dstas/DstasTransferService'
 import { PeerTokenClient } from '@bsv/message-box-client'
 import { StasTokenSettlementAdapter } from './tokens/peer/StasTokenSettlementAdapter'
@@ -95,6 +96,12 @@ export type StasServices = {
   bsv21Discovery: BSV21DiscoveryService
   /** 1Sat overlay REST client — exposed for diagnostics + the receive UI. */
   bsv21Indexer: OneSatIndexerClient
+  /**
+   * Back-to-Genesis provenance client. Verifies that a held/received token
+   * output provably descends from its genesis mint (counterfeit detection).
+   * Reads WOC's bStore-walking endpoints, independent of the token index.
+   */
+  backToGenesis: BackToGenesisClient
   /**
    * Peer-to-peer token client over MessageBox (the token analog of PeerPay).
    * Sends/accepts STAS, DSTAS, and BSV-21 tokens directly to a recipient's
@@ -610,6 +617,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       // StasDiscoveryService, BSV-21 rides BSV21DiscoveryService, all fed by
       // the same WocTokenIndexerClient.
       const wocIndexer = new WocTokenIndexerClient({ chain })
+      const backToGenesis = new BackToGenesisClient({ chain })
 
       const stasDiscovery = new StasDiscoveryService({
         deriver: stasKeyDeriver,
@@ -655,6 +663,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         bsv21KeyDeriver,
         bsv21Discovery,
         bsv21Indexer,
+        backToGenesis,
         peerTokens,
       }
 
