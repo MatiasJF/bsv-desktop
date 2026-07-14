@@ -30,7 +30,6 @@ import { buildBsv21Transfer } from './inscription';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { OneSatIndexerClient } from './OneSatIndexerClient';
 import type { BSV21KeyDeriver } from './BSV21KeyDeriver';
-import type { RelayClient } from '../../relay/RelayClient';
 
 const ORIGINATOR = 'admin.bsv21-transfer';
 
@@ -91,14 +90,6 @@ export interface BSV21TransferDeps {
   indexer: OneSatIndexerClient;
   /** Toggle the overlay check off when the indexer is known unavailable. */
   originVerify?: boolean;
-  /**
-   * Stas-relay client for organic-receive bridging. When set, the service
-   * pushes `(txid, recipientAddress, 'bsv-21')` after broadcast so a
-   * remote recipient's wallet can discover the send without needing the
-   * BSV-21 topic-manager to be running for the token (which requires
-   * fee-address activation).
-   */
-  relay?: RelayClient;
 }
 
 /** Dynamic bsv-js import — same pattern StasTransferService uses. */
@@ -477,35 +468,6 @@ export class BSV21TransferService {
       console.warn(`[bsv-21 transfer] overlay submit threw: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // 12. Stas-relay push — best-effort organic-receive bridge. The overlay
-    //     submit above only works for tokens whose per-token topic-manager
-    //     is running (fee-address activation). For unactivated tokens or
-    //     when the overlay rejects (HTTP 500 we've seen on fresh mints),
-    //     the relay lets a remote recipient's wallet still discover the
-    //     send via address-keyed mailbox pull during their next scan.
-    //
-    //     Fail-soft: RelayClient.push returns null on errors and never
-    //     throws; the transfer is reported ok regardless.
-    if (this.deps.relay && signResp?.txid) {
-      try {
-        const res = await this.deps.relay.push({
-          txid: signResp.txid,
-          recipientAddress,
-          protocol: 'bsv-21',
-        });
-        if (res) {
-          console.log(`[bsv-21 transfer] relay push ✓ ${signResp.txid.slice(0, 12)}… → ${recipientAddress}${res.duplicate ? ' (dup)' : ''}`);
-        } else {
-          console.warn('[bsv-21 transfer] relay push returned null (relay unreachable)');
-        }
-      } catch (err) {
-        console.warn(`[bsv-21 transfer] relay push threw: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    const wocBase = this.deps.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/';
-    // eslint-disable-next-line no-console
-    console.log(`[bsv-21 transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`);
     return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
   }
 }

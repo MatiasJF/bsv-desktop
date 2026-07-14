@@ -45,7 +45,7 @@ import { toast } from 'react-toastify'
 import { EventEmittable } from './EventEmittable'
 import { PermissionQueueManager } from './PermissionQueueManager'
 import { PeerPayManager } from './PeerPayManager'
-import { StasKeyDeriver, StasOwnershipService, IndexerClient, StasRegistration, StasDiscoveryService, StasTransferService } from './stas'
+import { StasKeyDeriver, StasOwnershipService, StasRegistration, StasDiscoveryService, StasTransferService } from './stas'
 import {
   TokenProtocolRegistry,
   StasProtocolAdapter,
@@ -58,7 +58,6 @@ import {
   BSV21DiscoveryService,
 } from './tokens'
 import { WocTokenIndexerClient } from './tokens/woc/WocTokenIndexerClient'
-import { getTokenDiscoverySource } from './tokens/discoverySource'
 import { DstasTransferService } from './tokens/dstas/DstasTransferService'
 import { PeerTokenClient } from '@bsv/message-box-client'
 import { StasTokenSettlementAdapter } from './tokens/peer/StasTokenSettlementAdapter'
@@ -573,22 +572,6 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       }
       this._wallet = wallet
 
-      // Optional relay-assisted discovery + send-push bridge. The relay
-      // closes the organic-receive gap for protocols Bitails doesn't cover
-      // (DSTAS; optionally BSV-21 inactive transfers): senders push
-      // (txid, recipientAddress, protocol) after broadcast; receivers
-      // poll per derived address during their discovery scan.
-      //
-      // URL resolution lives in `relay/relayUrl.ts`. Order: localStorage
-      // override (Settings UI) → `VITE_RELAY_URL` env → default
-      // `http://127.0.0.1:8081`. Empty string at any layer disables the
-      // integration entirely. Constructed BEFORE the transfer services
-      // so they can inject it.
-      const relayUrl = (await import('./relay/relayUrl')).getRelayUrl()
-      const relay = relayUrl
-        ? new (await import('./relay/RelayClient')).RelayClient({ baseUrl: relayUrl })
-        : undefined
-
       // STAS BRC-42 services — ownership recognition + receive-key derivation,
       // plus the Task-4 discovery loop (WoC scan -> internalizeAction).
       const stasKeyDeriver = new StasKeyDeriver(wallet, keyDeriver.identityKey, chain)
@@ -599,8 +582,7 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       // namespace, builds the new output via the SDK's pure
       // buildDstasLockingScript, and assembles the DSTAS unlocking
       // script byte-for-byte to match the template's witness format.
-      // Relay push on broadcast bridges the organic-receive gap.
-      const dstasTransfer = new DstasTransferService(wallet, keyDeriver.identityKey, chain, relay)
+      const dstasTransfer = new DstasTransferService(wallet, keyDeriver.identityKey, chain)
 
       // BSV-21 services — separate BRC-42 namespace, 1Sat REST indexer,
       // standard P2PKH unlock path.
@@ -613,7 +595,6 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
         chain,
         deriver: bsv21KeyDeriver,
         indexer: bsv21Indexer,
-        relay,
       })
 
       // Token-protocol adapter registry. Order matters: STAS's prefix sniff
@@ -624,28 +605,22 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
       tokens.register(new DstasProtocolAdapter(dstasTransfer))
       tokens.register(new BSV21ProtocolAdapter(bsv21Transfer))
 
-      // Token discovery source (default 'woc'). WOC is one provider for all
-      // three standards: STAS + DSTAS ride StasDiscoveryService, BSV-21 rides
-      // BSV21DiscoveryService — both fed by the same WocTokenIndexerClient.
-      // 'legacy' falls back to Bitails (STAS) + relay (DSTAS) + 1Sat overlay
-      // (BSV-21) as a one-release rollback net. See tokens/discoverySource.ts.
-      const discoverySource = getTokenDiscoverySource()
-      const wocIndexer =
-        discoverySource === 'woc' ? new WocTokenIndexerClient({ chain }) : undefined
+      // Token discovery — WhatsOnChain is the single source for all three
+      // standards: STAS (by base58 address) and DSTAS (by owner hash160) ride
+      // StasDiscoveryService, BSV-21 rides BSV21DiscoveryService, all fed by
+      // the same WocTokenIndexerClient.
+      const wocIndexer = new WocTokenIndexerClient({ chain })
 
       const stasDiscovery = new StasDiscoveryService({
         deriver: stasKeyDeriver,
-        indexer: wocIndexer ?? new IndexerClient(),
+        indexer: wocIndexer,
         registration: stasRegistration,
         wallet,
         registry: tokens,
-        // WOC discovers DSTAS organically (getDstasUtxosForOwners), so the
-        // relay-assist is only wired in legacy mode.
-        relay: discoverySource === 'woc' ? undefined : relay,
       })
       const bsv21Discovery = new BSV21DiscoveryService({
         deriver: bsv21KeyDeriver,
-        indexer: wocIndexer ?? bsv21Indexer,
+        indexer: wocIndexer,
         registration: bsv21Registration,
         wallet,
       })
@@ -666,9 +641,8 @@ export class WalletService extends EventEmittable<WalletServiceEvents> {
             chain,
             deriver: bsv21KeyDeriver,
             indexer: bsv21Indexer,
-            relay,
           }),
-          new DstasTokenSettlementAdapter(wallet, keyDeriver.identityKey, chain, relay),
+          new DstasTokenSettlementAdapter(wallet, keyDeriver.identityKey, chain),
         ],
       })
 

@@ -28,10 +28,27 @@
  */
 
 import { wocFetch } from '../../../utils/RateLimitedFetch';
-import type { WocUtxo } from '../../stas/IndexerClient';
 import type { IndexedOutput } from '../bsv21/OneSatIndexerClient';
 
 const WOC_BASE = 'https://api.whatsonchain.com/v1/bsv';
+
+/** A token UTXO as returned by WOC's per-address token endpoints. */
+export interface WocUtxo {
+  /** Transaction id (hex). */
+  txid: string;
+  /** Output index. */
+  vout: number;
+  /** Satoshis. For STAS/DSTAS this equals the token amount. */
+  value: number;
+  /** Block height. WOC's token endpoints omit it; we pass a mempool-safe sentinel. */
+  height: number;
+  /** Ticker, when the indexer decoded one. */
+  symbol?: string;
+  /** tokenId / issuer PKH hex, when present in the response. */
+  redeemAddr?: string;
+  /** Full locking script hex (`?script=true`) — lets the scan skip a getRawTx. */
+  scriptHex?: string;
+}
 
 export interface WocTokenIndexerOptions {
   chain?: 'main' | 'test';

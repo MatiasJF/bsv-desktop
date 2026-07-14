@@ -65,6 +65,8 @@ describe('StasDiscoveryService.scan', () => {
   test('scans the derived gap range and returns empty counts when the indexer finds nothing', async () => {
     const deriver = mkDeriver()
     const indexer: any = {
+      // WOC serves DSTAS by owner hash160; these cases exercise the STAS path.
+      getDstasUtxosForOwners: async () => [],
       getUtxosForAddresses: async (addrs: string[]) =>
         addrs.map((a) => ({ address: a, utxos: [] })),
     }
@@ -86,6 +88,8 @@ describe('StasDiscoveryService.scan', () => {
     const targetAddress = ownerAddress(k3.ownerFieldHash160)
 
     const indexer: any = {
+      // WOC serves DSTAS by owner hash160; these cases exercise the STAS path.
+      getDstasUtxosForOwners: async () => [],
       getUtxosForAddresses: async (addrs: string[]) =>
         addrs.map((a) => ({
           address: a,
@@ -131,6 +135,8 @@ describe('StasDiscoveryService.scan', () => {
     const targetAddress = ownerAddress(k1.ownerFieldHash160)
 
     const indexer: any = {
+      // WOC serves DSTAS by owner hash160; these cases exercise the STAS path.
+      getDstasUtxosForOwners: async () => [],
       getUtxosForAddresses: async (addrs: string[]) =>
         addrs.map((a) => ({
           address: a,
@@ -166,6 +172,8 @@ describe('StasDiscoveryService.scan', () => {
     const deriver = mkDeriver()
     let addressesSeen = 0
     const indexer: any = {
+      // WOC serves DSTAS by owner hash160; these cases exercise the STAS path.
+      getDstasUtxosForOwners: async () => [],
       getUtxosForAddresses: async (addrs: string[]) => {
         addressesSeen = addrs.length
         return addrs.map((a) => ({ address: a, utxos: [] }))
@@ -192,6 +200,8 @@ describe('StasDiscoveryService.scan', () => {
     const ourAddress = ownerAddress(ourFirstKey.ownerFieldHash160)
 
     const indexer: any = {
+      // WOC serves DSTAS by owner hash160; these cases exercise the STAS path.
+      getDstasUtxosForOwners: async () => [],
       getUtxosForAddresses: async (addrs: string[]) =>
         addrs.map((a) => ({
           address: a,

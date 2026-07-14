@@ -25,7 +25,6 @@ import { parseDstasLockingScript } from '../../stas/dstasParser';
 import { encodeBrc29KeyId } from './brc29KeyId';
 import { STAS_PROTOCOL_ID } from '../../stas/constants';
 import { DSTAS_BASKET } from '../../../constants/baskets';
-import type { RelayClient } from '../../relay/RelayClient';
 import type {
   TokenSettlementAdapter, TokenSourceRef, TokenSettlementArtifact,
   TokenAdapterContext, TokenBuildResult, TokenAcceptResult,
@@ -43,8 +42,7 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
   constructor(
     private readonly wallet: WalletInterface,
     private readonly identityKey: string,
-    private readonly chain: 'main' | 'test',
-    private readonly relay?: RelayClient
+    private readonly chain: 'main' | 'test'
   ) {}
 
   /** BRC-29-style derivation (shared STAS namespace) so the recipient can reconstruct the key. */
@@ -112,7 +110,7 @@ export class DstasTokenSettlementAdapter implements TokenSettlementAdapter {
         senderChange = { ownerFieldHash160: ctxRow.ownerFieldHash160, keyId: ctxRow.keyId };
       }
 
-      const transfer = new DstasTransferService(this.wallet, this.identityKey, this.chain, this.relay);
+      const transfer = new DstasTransferService(this.wallet, this.identityKey, this.chain);
       const res = await transfer.transfer({
         source: {
           txid: source.txid,

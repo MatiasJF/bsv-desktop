@@ -41,7 +41,6 @@ import { stasQuery } from '../../stas/stasIpc'
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef'
 import { StasRegistration } from '../../stas/StasRegistration'
 import { buildDstasUnlockingScript, DSTAS_SIGHASH_TYPE } from './buildDstasUnlockingScript'
-import type { RelayClient } from '../../relay/RelayClient'
 
 /**
  * Dynamic bsv-js import — same pattern StasTransferService uses.
@@ -106,17 +105,7 @@ export class DstasTransferService {
   constructor(
     private readonly wallet: WalletInterface,
     private readonly identityKey: string,
-    private readonly chain: 'main' | 'test',
-    /**
-     * Optional stas-relay client for organic-receive bridging. When set,
-     * the service pushes `(txid, recipientAddress, 'dstas')` after
-     * broadcast so a remote recipient's wallet can discover the send
-     * during its next scan without needing colocated
-     * `/stas/register-by-txid` access. Bitails's STAS-aware matcher does
-     * NOT recognise DSTAS template scripts, so the relay is the primary
-     * discovery channel for DSTAS receives.
-     */
-    private readonly relay?: RelayClient
+    private readonly chain: 'main' | 'test'
   ) {}
 
   async transfer(args: DstasTransferArgs): Promise<DstasTransferResult> {
@@ -529,28 +518,6 @@ export class DstasTransferService {
         return {
           ok: false,
           reason: `broadcast failed: ${JSON.stringify(failed)} (txid was ${signResp?.txid})`,
-        }
-      }
-
-      // 15. Stas-relay push — DSTAS has no public indexer (Bitails's STAS
-      //     matcher rejects DSTAS scripts), so the relay is how a remote
-      //     recipient's wallet discovers this send during its next scan.
-      //     Fail-soft: RelayClient.push returns null on errors and never
-      //     throws; the transfer is reported ok regardless.
-      if (this.relay && signResp?.txid) {
-        try {
-          const res = await this.relay.push({
-            txid: signResp.txid,
-            recipientAddress,
-            protocol: 'dstas',
-          })
-          if (res) {
-            console.log(`[dstas-transfer] relay push ✓ ${signResp.txid.slice(0, 12)}… → ${recipientAddress}${res.duplicate ? ' (dup)' : ''}`)
-          } else {
-            console.warn('[dstas-transfer] relay push returned null (relay unreachable)')
-          }
-        } catch (err) {
-          console.warn(`[dstas-transfer] relay push threw: ${errMsg(err)}`)
         }
       }
 
