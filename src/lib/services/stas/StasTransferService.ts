@@ -22,6 +22,8 @@ import { STAS_PROTOCOL_ID, STAS_COUNTERPARTY } from './constants';
 import { STAS_BASKET } from '../../constants/baskets';
 import { stasQuery } from './stasIpc';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
+import { StasRegistration } from './StasRegistration';
+import { parseClassicStasMetadata } from './parseClassicStasMetadata';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -530,6 +532,46 @@ export class StasTransferService {
       const wocBase = this.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/';
       // eslint-disable-next-line no-console
       console.log(`[stas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`);
+
+      // 14. Link the sender's token-change output (vout 1 — outputs are not
+      //     randomized) into the satellite tables. The Assets view reads STAS
+      //     holdings from `listStasOutputs`, NOT from the basket, so without
+      //     this the remainder of a partial send stays invisible until a
+      //     discovery scan happens to pick it back up off the chain — even
+      //     though we minted the output ourselves and know everything about it.
+      //     `skipInternalize` because createAction already declared its basket.
+      //     Idempotent, so a caller that registers the change itself (the peer
+      //     settlement adapter does) simply gets 'already registered'.
+      if (changeStasScriptHex != null && args.senderChangeHash160 && signResp?.txid) {
+        try {
+          const meta = parseClassicStasMetadata(source.scriptHex);
+          const r = await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
+            txid: signResp.txid,
+            vout: 1,
+            tokenSatoshis: changeAmt,
+            ownerFieldHash160: args.senderChangeHash160,
+            brc42KeyId: args.senderChangeKeyId ?? source.brc42KeyId,
+            parsed: {
+              tokenId: args.tokenId ?? '',
+              ownerFieldHash160: args.senderChangeHash160,
+              symbol: meta?.symbol ?? undefined,
+              flagsHex: meta?.flagsHex ?? '',
+              serviceFields: [], optionalData: [],
+              freezeEnabled: false, confiscationEnabled: false, frozen: false, actionData: {},
+            } as any,
+            protocol: { id: 'stas', basketName: STAS_BASKET },
+            skipInternalize: true,
+          });
+          if (!r.registered && r.reason !== 'already registered') {
+            console.warn(`[stas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`);
+          }
+        } catch (err) {
+          // Best-effort: the output exists on-chain and in the basket either
+          // way, and a scan re-registers it. Never fail a broadcast tx here.
+          console.warn(`[stas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`);
+        }
+      }
+
       return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
     } finally {
       await restoreBasket();

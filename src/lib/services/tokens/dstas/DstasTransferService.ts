@@ -39,6 +39,7 @@ import { DSTAS_BASKET } from '../../../constants/baskets'
 import { parseDstasLockingScript } from '../../stas/dstasParser'
 import { stasQuery } from '../../stas/stasIpc'
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef'
+import { StasRegistration } from '../../stas/StasRegistration'
 import { buildDstasUnlockingScript, DSTAS_SIGHASH_TYPE } from './buildDstasUnlockingScript'
 import type { RelayClient } from '../../relay/RelayClient'
 
@@ -556,6 +557,40 @@ export class DstasTransferService {
       const wocBase = this.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/'
       // eslint-disable-next-line no-console
       console.log(`[dstas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`)
+
+      // 16. Link the sender's token-change output (vout 1) into the satellite
+      //     tables. The Assets view reads DSTAS holdings from `listStasOutputs`,
+      //     not from the basket, so without this the remainder of a partial send
+      //     is invisible until a discovery scan re-finds it on-chain. We built
+      //     the output, so there is nothing to discover. `skipInternalize`:
+      //     createAction already declared its basket. Idempotent — the peer
+      //     settlement adapter's own registration then reports 'already
+      //     registered'.
+      if (changeDstasScriptHex != null && args.senderChangeHash160 && signResp?.txid) {
+        try {
+          const parsedChange = parseDstasLockingScript(source.scriptHex)
+          const r = await new StasRegistration(this.wallet, this.identityKey, this.chain).register({
+            txid: signResp.txid,
+            vout: 1,
+            tokenSatoshis: changeAmt,
+            ownerFieldHash160: args.senderChangeHash160,
+            brc42KeyId: args.senderChangeKeyId ?? source.brc42KeyId,
+            parsed: {
+              ...(parsedChange ?? {}),
+              ownerFieldHash160: args.senderChangeHash160,
+              tokenId: args.tokenId ?? '',
+            } as any,
+            protocol: { id: 'dstas', basketName: DSTAS_BASKET },
+            skipInternalize: true,
+          })
+          if (!r.registered && r.reason !== 'already registered') {
+            console.warn(`[dstas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`)
+          }
+        } catch (err) {
+          console.warn(`[dstas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`)
+        }
+      }
+
       return { ok: true, txid: signResp?.txid, beef: signResp?.tx }
     } finally {
       await restoreBasket()
