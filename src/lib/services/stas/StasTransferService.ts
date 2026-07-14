@@ -24,6 +24,7 @@ import { stasQuery } from './stasIpc';
 import { buildChainedAtomicBeef } from './buildChainedAtomicBeef';
 import { StasRegistration } from './StasRegistration';
 import { parseClassicStasMetadata } from './parseClassicStasMetadata';
+import { tokenLog } from '../tokens/tokenLog';
 
 async function loadStasDeps(): Promise<{
   bsv: any;
@@ -150,8 +151,7 @@ export class StasTransferService {
     try {
       const derivedOwnerPkh = bsv.crypto.Hash.sha256ripemd160(ownerPubKey.toBuffer()).toString('hex');
       const sourceOwnerPkh = source.scriptHex.substring(6, 46);
-      // eslint-disable-next-line no-console
-      console.log('[stas-transfer] OWNER CHECK — keyID:', ownerDerivation.keyID,
+      tokenLog.debug('[stas-transfer] OWNER CHECK — keyID:', ownerDerivation.keyID,
         'counterparty:', ownerDerivation.counterparty,
         '| derived pkh:', derivedOwnerPkh, '| source owner pkh:', sourceOwnerPkh,
         '| MATCH:', derivedOwnerPkh === sourceOwnerPkh);
@@ -224,18 +224,17 @@ export class StasTransferService {
     }
 
     // ---- diagnostic: surface the field-level expectations engine eval cares about ----
-    /* eslint-disable no-console */
     try {
       const sourceOwnerPkh = sh.substring(6, 46);
       const newOwnerPkh = newStasScriptHex.substring(6, 46);
       const headSame = newStasScriptHex.substring(0, 6) === sh.substring(0, 6);
       const tailSame = newStasScriptHex.substring(46) === sh.substring(46);
       const lengthSame = newStasScriptHex.length === sh.length;
-      console.log('[stas-transfer] source pkh →', sourceOwnerPkh);
-      console.log('[stas-transfer] new pkh    →', newOwnerPkh, '(matches recipient:', newOwnerPkh === recipientPkhHex, ')');
-      console.log('[stas-transfer] source.satoshis =', source.satoshis);
-      console.log('[stas-transfer] stas version =', stasVersion);
-      console.log('[stas-transfer] new script invariants — length same:', lengthSame, '· head same:', headSame, '· tail same:', tailSame);
+      tokenLog.debug('[stas-transfer] source pkh →', sourceOwnerPkh);
+      tokenLog.debug('[stas-transfer] new pkh    →', newOwnerPkh, '(matches recipient:', newOwnerPkh === recipientPkhHex, ')');
+      tokenLog.debug('[stas-transfer] source.satoshis =', source.satoshis);
+      tokenLog.debug('[stas-transfer] stas version =', stasVersion);
+      tokenLog.debug('[stas-transfer] new script invariants — length same:', lengthSame, '· head same:', headSame, '· tail same:', tailSame);
       if (!tailSame) {
         // Surface the first diverging byte if the engine/tail isn't preserved.
         const len = Math.min(newStasScriptHex.length, sh.length);
@@ -243,11 +242,10 @@ export class StasTransferService {
         for (let i = 46; i < len; i++) {
           if (newStasScriptHex[i] !== sh[i]) { firstDiff = i; break; }
         }
-        console.log('[stas-transfer] first diverging hex index past owner-pkh:', firstDiff,
+        tokenLog.debug('[stas-transfer] first diverging hex index past owner-pkh:', firstDiff,
           firstDiff >= 0 ? `(source="${sh.substring(firstDiff, firstDiff + 12)}…" new="${newStasScriptHex.substring(firstDiff, firstDiff + 12)}…")` : '');
       }
     } catch { /* never block on logging */ }
-    /* eslint-enable no-console */
 
     // 4. Build inputBEEF (Services + WoC fallback).
     let inputBEEF: number[];
@@ -284,11 +282,9 @@ export class StasTransferService {
         [0]
       );
       previousBasketTarget = res?.previous ?? null;
-      /* eslint-disable-next-line no-console */
-      console.log('[stas-transfer] basket UTXO target: previous=', previousBasketTarget, 'set to 0; updated rows=', res?.updated);
+      tokenLog.debug('[stas-transfer] basket UTXO target: previous=', previousBasketTarget, 'set to 0; updated rows=', res?.updated);
     } catch (err) {
-      /* eslint-disable-next-line no-console */
-      console.warn(
+      tokenLog.warn(
         '[stas-transfer] setDefaultBasketUTXOTarget failed — fragmentation will likely break the engine. ' +
         'Likely cause: stale dist-electron build. Fully restart `npm run dev`. Underlying error:',
         err
@@ -392,8 +388,7 @@ export class StasTransferService {
         return { ok: false, reason: `parse signable tx: ${errMsg(err)}` };
       }
 
-      /* eslint-disable no-console */
-      console.log('[stas-transfer] tx.inputs.length=', tx.inputs.length);
+      tokenLog.debug('[stas-transfer] tx.inputs.length=', tx.inputs.length);
       for (let i = 0; i < tx.inputs.length; i++) {
         const inp = tx.inputs[i];
         const prevTxidHex =
@@ -401,13 +396,12 @@ export class StasTransferService {
             ? inp.prevTxId
             : Buffer.from(inp.prevTxId).toString('hex');
         const tag = i === 0 ? '(STAS)' : i === tx.inputs.length - 1 ? '(funding-last)' : '(extra)';
-        console.log(`  in ${i} ${tag}: ${prevTxidHex.substring(0, 16)}…:${inp.outputIndex}`);
+        tokenLog.debug(`  in ${i} ${tag}: ${prevTxidHex.substring(0, 16)}…:${inp.outputIndex}`);
       }
-      console.log('[stas-transfer] outputs.length=', tx.outputs.length);
+      tokenLog.debug('[stas-transfer] outputs.length=', tx.outputs.length);
       for (let v = 0; v < tx.outputs.length; v++) {
-        console.log(`  out ${v}: ${tx.outputs[v].satoshis} sats, len=${tx.outputs[v].script.toHex().length / 2}`);
+        tokenLog.debug(`  out ${v}: ${tx.outputs[v].satoshis} sats, len=${tx.outputs[v].script.toHex().length / 2}`);
       }
-      /* eslint-enable no-console */
 
       // The classic STAS engine encodes exactly ONE funding outpoint into the
       // unlock witness (input 0 is the STAS being spent; the funding input is
@@ -511,9 +505,7 @@ export class StasTransferService {
         return { ok: false, reason: `signAction: ${errMsg(err)}` };
       }
 
-      /* eslint-disable no-console */
-      console.log('[stas-transfer] signAction result:', signResp);
-      /* eslint-enable no-console */
+      tokenLog.debug('[stas-transfer] signAction result:', signResp);
 
       // signAction returns txid as soon as the tx is finalized, regardless of
       // whether broadcast succeeded. Inspect sendWithResults to see if any
@@ -530,8 +522,7 @@ export class StasTransferService {
       }
 
       const wocBase = this.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/';
-      // eslint-disable-next-line no-console
-      console.log(`[stas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`);
+      tokenLog.info(`[stas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`);
 
       // 14. Link the sender's token-change output (vout 1 — outputs are not
       //     randomized) into the satellite tables. The Assets view reads STAS
@@ -563,12 +554,12 @@ export class StasTransferService {
             skipInternalize: true,
           });
           if (!r.registered && r.reason !== 'already registered') {
-            console.warn(`[stas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`);
+            tokenLog.warn(`[stas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`);
           }
         } catch (err) {
           // Best-effort: the output exists on-chain and in the basket either
           // way, and a scan re-registers it. Never fail a broadcast tx here.
-          console.warn(`[stas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`);
+          tokenLog.warn(`[stas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`);
         }
       }
 

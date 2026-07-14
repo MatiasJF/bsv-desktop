@@ -41,6 +41,7 @@ import { stasQuery } from '../../stas/stasIpc'
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef'
 import { StasRegistration } from '../../stas/StasRegistration'
 import { buildDstasUnlockingScript, DSTAS_SIGHASH_TYPE } from './buildDstasUnlockingScript'
+import { tokenLog } from '../tokenLog'
 
 /**
  * Dynamic bsv-js import — same pattern StasTransferService uses.
@@ -253,7 +254,7 @@ export class DstasTransferService {
       )
       previousBasketTarget = res?.previous ?? null
     } catch (err) {
-      console.warn(
+      tokenLog.warn(
         '[dstas-transfer] setDefaultBasketUTXOTarget failed — fragmentation may break the template. ' +
         'Likely cause: stale dist-electron build. Fully restart `npm run dev`. Error:',
         err
@@ -403,7 +404,7 @@ export class DstasTransferService {
         }
       }
 
-      console.log(
+      tokenLog.debug(
         `[dstas-transfer] tx shape: ${tx.inputs.length} inputs (DSTAS at 0, funding at ${fundingInputIdx}), ${tx.outputs.length} outputs`
       )
 
@@ -478,21 +479,21 @@ export class DstasTransferService {
           unlockingScriptHex,
         })
         if (evalResult.success) {
-          console.log('[dstas-transfer] script-evaluator pre-broadcast: success')
+          tokenLog.debug('[dstas-transfer] script-evaluator pre-broadcast: success')
         } else {
           // Expected when the funding input isn't signed yet — log full
           // diagnostic so a real failure mode (e.g. byte-mismatch on
           // input 0's unlock) can be diagnosed from the dev tools.
-          console.warn(
+          tokenLog.warn(
             '[dstas-transfer] script-evaluator pre-broadcast: NON-SUCCESS (expected — funding input still unsigned at this point). ' +
             `Diagnostic: ${evalResult.reason ?? 'no detail'}`
           )
           if (evalResult.fullResult) {
-            console.warn('[dstas-transfer] full evaluator result:', evalResult.fullResult)
+            tokenLog.warn('[dstas-transfer] full evaluator result:', evalResult.fullResult)
           }
         }
       } catch (err) {
-        console.warn(`[dstas-transfer] script-evaluator threw: ${errMsg(err)}`)
+        tokenLog.warn(`[dstas-transfer] script-evaluator threw: ${errMsg(err)}`)
       }
 
       // 14. signAction. wallet-toolbox signs the funding input and
@@ -522,8 +523,7 @@ export class DstasTransferService {
       }
 
       const wocBase = this.chain === 'main' ? 'https://whatsonchain.com/tx/' : 'https://test.whatsonchain.com/tx/'
-      // eslint-disable-next-line no-console
-      console.log(`[dstas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`)
+      tokenLog.info(`[dstas-transfer] BROADCAST ✓ txid: ${signResp?.txid}  ${wocBase}${signResp?.txid}`)
 
       // 16. Link the sender's token-change output (vout 1) into the satellite
       //     tables. The Assets view reads DSTAS holdings from `listStasOutputs`,
@@ -551,10 +551,10 @@ export class DstasTransferService {
             skipInternalize: true,
           })
           if (!r.registered && r.reason !== 'already registered') {
-            console.warn(`[dstas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`)
+            tokenLog.warn(`[dstas-transfer] token-change NOT registered: ${r.reason} (scan will recover)`)
           }
         } catch (err) {
-          console.warn(`[dstas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`)
+          tokenLog.warn(`[dstas-transfer] token-change registration threw: ${errMsg(err)} (scan will recover)`)
         }
       }
 

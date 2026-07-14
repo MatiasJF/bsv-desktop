@@ -119,11 +119,21 @@ class StorageManager {
     });
     console.log(`[Storage] STAS migrations complete`);
 
-    // Create StorageKnex instance
+    // Create StorageKnex instance.
+    //
+    // feeModel: TAAL and GorillaPool both advertise a miningFee of 100 sat/1000
+    // bytes (`GET /v1/policy`), i.e. 0.1 sat/byte. Paying exactly 100 sat/kb put
+    // us *on* that floor with zero headroom, which is fine for a standalone tx
+    // but not for tokens: miners price the whole unconfirmed ancestor package,
+    // and a token transfer's package includes engine-signed txs that pay less.
+    // One underpriced ancestor then drags the package average below policy and
+    // the entire chain stalls — observed on a 21-tx mint package that settled at
+    // 0.095 sat/b and needed a CPFP bump to confirm. 250 sat/kb buys margin for
+    // pennies: a 500-byte transfer costs 125 sat instead of 50.
     const storage = new StorageKnex({
       knex: db,
       chain: chain,
-      feeModel: { model: 'sat/kb', value: 100 },
+      feeModel: { model: 'sat/kb', value: 250 },
       commissionSatoshis: 0
     });
 

@@ -30,6 +30,7 @@ import { buildBsv21Transfer } from './inscription';
 import { buildChainedAtomicBeef } from '../../stas/buildChainedAtomicBeef';
 import { OneSatIndexerClient } from './OneSatIndexerClient';
 import type { BSV21KeyDeriver } from './BSV21KeyDeriver';
+import { tokenLog } from '../tokenLog';
 
 const ORIGINATOR = 'admin.bsv21-transfer';
 
@@ -160,7 +161,7 @@ export class BSV21TransferService {
         // body). Log and proceed — the recipient's wallet still trusts
         // the inscription bytes for ownership; the worst case is they
         // can't see a token-scoped balance until activation.
-        console.warn(
+        tokenLog.warn(
           `[bsv-21 transfer] origin validate unavailable for ${source.tokenId} — proceeding without ancestry check`
         );
       } else if (!valid.has(sourceOutpointUnderscored)) {
@@ -174,7 +175,7 @@ export class BSV21TransferService {
         //     origin validation on the receive side (the real gate), and
         //   • the broadcast goes through wallet-toolbox/ARC, not the overlay.
         // So warn and proceed; the recipient's indexer decides admissibility.
-        console.warn(
+        tokenLog.warn(
           `[bsv-21 transfer] origin outpoint ${sourceOutpointUnderscored} not in overlay validated set for ${source.tokenId} — proceeding (WOC indexer is the receive-side gate)`
         );
       }
@@ -457,15 +458,15 @@ export class BSV21TransferService {
           tokenId: source.tokenId,
         });
         if (submit.ok) {
-          console.log(`[bsv-21 transfer] overlay submit ✓ ${submit.body.slice(0, 200)}`);
+          tokenLog.debug(`[bsv-21 transfer] overlay submit ✓ ${submit.body.slice(0, 200)}`);
         } else {
-          console.warn(`[bsv-21 transfer] overlay submit ${submit.status}: ${submit.body.slice(0, 200)}`);
+          tokenLog.warn(`[bsv-21 transfer] overlay submit ${submit.status}: ${submit.body.slice(0, 200)}`);
         }
       } else {
-        console.warn('[bsv-21 transfer] overlay submit skipped — signResp.tx empty (returnTXIDOnly?)');
+        tokenLog.warn('[bsv-21 transfer] overlay submit skipped — signResp.tx empty (returnTXIDOnly?)');
       }
     } catch (err) {
-      console.warn(`[bsv-21 transfer] overlay submit threw: ${err instanceof Error ? err.message : String(err)}`);
+      tokenLog.warn(`[bsv-21 transfer] overlay submit threw: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return { ok: true, txid: signResp?.txid, beef: signResp?.tx };
